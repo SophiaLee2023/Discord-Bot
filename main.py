@@ -136,7 +136,7 @@ async def activitylist(ctx):
             await ctx.send('No activities found. Create one with `.activitycreate`')
             return
 
-        embed = discord.Embed(title='📋 Activities', color=discord.Color.blue())
+        embed = discord.Embed(title='Activities', color=discord.Color.blue())
         for activity in activities:
             embed.add_field(name=activity['name'], value='', inline=False)
         await ctx.send(embed=embed)
@@ -221,13 +221,15 @@ async def stats(ctx, user: discord.User = None):
         cursor = conn.cursor()
         now = datetime.now()
 
-        embed = discord.Embed(title=f"📊 {user.name}'s Stats", color=discord.Color.green())
+        embeds = []
 
         periods = [
-            ('today', now.replace(hour=0, minute=0, second=0, microsecond=0), '📅 Today'),
-            ('week', now - timedelta(days=now.weekday()), '📆 This Week'),
-            ('all', datetime.min, '⏳ All-Time'),
+            ('today', now.replace(hour=0, minute=0, second=0, microsecond=0), 'Today'),
+            ('week', now - timedelta(days=now.weekday()), 'This Week'),
+            ('all', datetime.min, 'All-Time'),
         ]
+
+        embed_stats = discord.Embed(title=f"{user.name}'s Time Tracking", color=discord.Color.blurple())
 
         for period, start_time, label in periods:
             if period != 'all':
@@ -246,16 +248,18 @@ async def stats(ctx, user: discord.User = None):
             stats_data = cursor.fetchall()
 
             if not stats_data:
-                embed.add_field(name=label, value='No time tracked', inline=False)
+                embed_stats.add_field(name=label, value='No time tracked', inline=True)
             else:
                 total_hours = 0
                 stats_text = ''
                 for row in stats_data:
                     hours = row['hours'] or 0
                     total_hours += hours
-                    stats_text += f"{row['name']}: {hours:.2f}h\n"
-                stats_text += f"**Total: {total_hours:.2f}h**"
-                embed.add_field(name=label, value=stats_text, inline=False)
+                    stats_text += f"{row['name']}: {hours:.1f}h\n"
+                stats_text += f"\n**{total_hours:.1f}h total**"
+                embed_stats.add_field(name=label, value=stats_text, inline=True)
+
+        embeds.append(embed_stats)
 
         twelve_weeks_ago = now - timedelta(weeks=12)
         cursor.execute('''
@@ -271,7 +275,8 @@ async def stats(ctx, user: discord.User = None):
 
         if daily_stats:
             heatmap = generate_heatmap(daily_stats, twelve_weeks_ago)
-            embed.add_field(name='📅 Heatmap (Last 12 Weeks)', value=heatmap, inline=False)
+            embed_heatmap = discord.Embed(title='Activity Heatmap (Last 12 Weeks)', description=heatmap, color=discord.Color.green())
+            embeds.append(embed_heatmap)
 
             cursor.execute('''
                 SELECT strftime('%w', clock_in) as day_of_week,
@@ -291,13 +296,18 @@ async def stats(ctx, user: discord.User = None):
             avg_per_day = total_hours / len(daily_stats) if daily_stats else 0
             streak = calculate_streak(daily_stats)
 
-            stats_summary = f'🔥 Streak: {streak} days | 📊 Max Day: {most_in_day:.1f}h | 📈 Avg: {avg_per_day:.1f}h/day | 🌟 Most Active: {most_active_day}'
-            embed.add_field(name='📈 Key Metrics', value=stats_summary, inline=False)
+            embed_metrics = discord.Embed(title='Key Metrics', color=discord.Color.orange())
+            embed_metrics.add_field(name='Streak', value=f'{streak} days', inline=True)
+            embed_metrics.add_field(name='Max Day', value=f'{most_in_day:.1f}h', inline=True)
+            embed_metrics.add_field(name='Daily Avg', value=f'{avg_per_day:.1f}h', inline=True)
+            embed_metrics.add_field(name='Most Active', value=most_active_day, inline=True)
+            embeds.append(embed_metrics)
 
         conn.close()
-        await ctx.send(embed=embed)
+        for embed in embeds:
+            await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send(f'❌ Error: {str(e)}')
+        await ctx.send(f'Error: {str(e)}')
 
 @bot.command(name='status', help='View your current status')
 async def status(ctx):
@@ -323,7 +333,7 @@ async def status(ctx):
         duration = datetime.now() - clock_in
         hours = duration.total_seconds() / 3600
 
-        embed = discord.Embed(title='⏱️ Current Status', color=discord.Color.yellow())
+        embed = discord.Embed(title='Current Status', color=discord.Color.yellow())
         embed.add_field(name='Activity', value=active['name'], inline=False)
         embed.add_field(name='Duration', value=f'{hours:.2f}h', inline=False)
         await ctx.send(embed=embed)
@@ -336,8 +346,8 @@ def generate_heatmap(daily_stats, start_date):
     current_week = []
 
     start_weekday = start_date.weekday()
-    for i in range(start_weekday):
-        current_week.append('  ')
+    for _ in range(start_weekday):
+        current_week.append('⬜')
 
     current_date = start_date
     while current_date <= now:
@@ -345,19 +355,17 @@ def generate_heatmap(daily_stats, start_date):
         hours = daily_stats.get(day_str, 0)
 
         if hours == 0:
-            emoji = '⬜'
+            square = '⬜'
         elif hours < 2:
-            emoji = '🟩'
+            square = '🟩'
         elif hours < 4:
-            emoji = '🟩'
+            square = '🟨'
         elif hours < 6:
-            emoji = '🟨'
-        elif hours < 8:
-            emoji = '🟧'
+            square = '🟧'
         else:
-            emoji = '🟥'
+            square = '🟥'
 
-        current_week.append(emoji)
+        current_week.append(square)
 
         if len(current_week) == 7:
             weeks.append(''.join(current_week))
@@ -421,7 +429,7 @@ async def leaderboard(ctx, *, activity_name: str):
             await ctx.send(f'No one has tracked time for **{activity["name"]}** yet!')
             return
 
-        embed = discord.Embed(title=f'🏆 {activity["name"]} Leaderboard', color=discord.Color.gold())
+        embed = discord.Embed(title=f'{activity["name"]} - Leaderboard', color=discord.Color.gold())
         medals = ['🥇', '🥈', '🥉']
 
         for idx, row in enumerate(results[:10]):
@@ -503,7 +511,7 @@ async def adminrole_list(ctx):
         await ctx.send('No admin roles configured yet!')
         return
 
-    embed = discord.Embed(title='👮 Admin Roles', color=discord.Color.blurple())
+    embed = discord.Embed(title='Admin Roles', color=discord.Color.blurple())
     for role_id in role_ids:
         role = ctx.guild.get_role(role_id)
         if role:
@@ -576,7 +584,7 @@ async def channel_list(ctx):
         await ctx.send('No channel restrictions set! Bot works in all channels.')
         return
 
-    embed = discord.Embed(title='📍 Allowed Bot Channels', color=discord.Color.blurple())
+    embed = discord.Embed(title='Allowed Bot Channels', color=discord.Color.blurple())
     for channel_id in channel_ids:
         channel = ctx.guild.get_channel(channel_id)
         if channel:
@@ -586,13 +594,135 @@ async def channel_list(ctx):
 
     await ctx.send(embed=embed)
 
+@bot.group(name='time', help='Manage time entries (admin only)')
+async def time(ctx):
+    if ctx.invoked_subcommand is None:
+        await ctx.send('Use `.time add @user <activity> <hours> [date]` or `.time remove @user <activity> <hours> [date]`')
+
+@time.command(name='add', help='Add time to a user for an activity')
+async def time_add(ctx, user: discord.User, activity_name: str, hours: float, *, date_str: str = None):
+    if not is_admin(ctx):
+        await ctx.send('❌ Only admins can use this command!')
+        return
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
+        activity = cursor.fetchone()
+        if not activity:
+            await ctx.send(f'❌ Activity "{activity_name}" not found!')
+            conn.close()
+            return
+
+        if date_str:
+            try:
+                clock_in = datetime.fromisoformat(date_str)
+            except:
+                try:
+                    clock_in = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                except:
+                    try:
+                        if date_str.lower() == 'today':
+                            clock_in = datetime.now()
+                        elif date_str.lower() == 'yesterday':
+                            clock_in = datetime.now() - timedelta(days=1)
+                        else:
+                            clock_in = datetime.strptime(date_str, '%Y-%m-%d')
+                    except:
+                        await ctx.send('❌ Invalid date format! Use: YYYY-MM-DD HH:MM or "today" or "yesterday"')
+                        conn.close()
+                        return
+        else:
+            clock_in = datetime.now()
+
+        clock_out = clock_in + timedelta(hours=hours)
+
+        cursor.execute('''
+            INSERT INTO time_entries (user_id, activity_id, clock_in, clock_out)
+            VALUES (?, ?, ?, ?)
+        ''', (user.id, activity['id'], clock_in.isoformat(), clock_out.isoformat()))
+        conn.commit()
+        conn.close()
+
+        await ctx.send(f'✅ Added {hours}h to {user.mention} for **{activity_name}** (recorded at {clock_in.strftime("%Y-%m-%d %H:%M")})')
+    except Exception as e:
+        await ctx.send(f'❌ Error: {str(e)}')
+
+@time.command(name='remove', help='Remove time from a user for an activity')
+async def time_remove(ctx, user: discord.User, activity_name: str, hours: float, *, date_str: str = None):
+    if not is_admin(ctx):
+        await ctx.send('❌ Only admins can use this command!')
+        return
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
+        activity = cursor.fetchone()
+        if not activity:
+            await ctx.send(f'❌ Activity "{activity_name}" not found!')
+            conn.close()
+            return
+
+        if date_str:
+            try:
+                target_date = datetime.fromisoformat(date_str)
+            except:
+                try:
+                    target_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                except:
+                    try:
+                        if date_str.lower() == 'today':
+                            target_date = datetime.now()
+                        elif date_str.lower() == 'yesterday':
+                            target_date = datetime.now() - timedelta(days=1)
+                        else:
+                            target_date = datetime.strptime(date_str, '%Y-%m-%d')
+                    except:
+                        await ctx.send('❌ Invalid date format! Use: YYYY-MM-DD HH:MM or "today" or "yesterday"')
+                        conn.close()
+                        return
+
+            cursor.execute('''
+                SELECT id FROM time_entries
+                WHERE user_id = ? AND activity_id = ? AND DATE(clock_in) = DATE(?)
+                ORDER BY clock_in DESC LIMIT 1
+            ''', (user.id, activity['id'], target_date.isoformat()))
+        else:
+            cursor.execute('''
+                SELECT id FROM time_entries
+                WHERE user_id = ? AND activity_id = ?
+                ORDER BY clock_in DESC LIMIT 1
+            ''', (user.id, activity['id']))
+
+        entry = cursor.fetchone()
+        if not entry:
+            await ctx.send(f'❌ No time entry found for {user.mention} on **{activity_name}**')
+            conn.close()
+            return
+
+        cursor.execute('''
+            UPDATE time_entries
+            SET clock_out = DATETIME(clock_out, '-' || ? || ' hours')
+            WHERE id = ?
+        ''', (hours, entry['id']))
+        conn.commit()
+        conn.close()
+
+        await ctx.send(f'✅ Removed {hours}h from {user.mention} for **{activity_name}**')
+    except Exception as e:
+        await ctx.send(f'❌ Error: {str(e)}')
+
 @bot.command(name='say', help='Make the bot say something')
 async def say(ctx, *, message: str):
     await ctx.send(message)
 
 @bot.command(name='helpme', help='Show all time tracking commands')
 async def helpme(ctx):
-    embed = discord.Embed(title='⏰ Time Tracking Bot Commands', color=discord.Color.purple())
+    embed = discord.Embed(title='Time Tracking Commands', color=discord.Color.purple())
     commands_info = [
         ('.activitycreate <name>', 'Create a new activity to track'),
         ('.activitylist', 'List all available activities'),

@@ -62,6 +62,10 @@ A Discord bot for tracking time spent on activities/commitments with per-user st
 - `.channel remove <channel>` - Remove channel restriction
 - `.channel list` - View all allowed channels (if none set, bot works everywhere)
 
+### Time Entry Management (Admin Only)
+- `.time add @user <activity> <hours> [date]` - Add time to a user (date: YYYY-MM-DD HH:MM, YYYY-MM-DD, today, yesterday; defaults to now)
+- `.time remove @user <activity> <hours> [date]` - Remove time from a user (date: YYYY-MM-DD HH:MM, YYYY-MM-DD, today, yesterday; defaults to now)
+
 ### Help
 - `.helpme` - Show all commands
 
