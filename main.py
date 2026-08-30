@@ -590,8 +590,8 @@ async def channel_list(ctx):
 async def say(ctx, *, message: str):
     await ctx.send(message)
 
-@bot.command(name='help', help='Show all time tracking commands')
-async def help(ctx):
+@bot.command(name='helpme', help='Show all time tracking commands')
+async def helpme(ctx):
     embed = discord.Embed(title='⏰ Time Tracking Bot Commands', color=discord.Color.purple())
     commands_info = [
         ('.activitycreate <name>', 'Create a new activity to track'),

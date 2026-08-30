@@ -63,7 +63,7 @@ A Discord bot for tracking time spent on activities/commitments with per-user st
 - `.channel list` - View all allowed channels (if none set, bot works everywhere)
 
 ### Help
-- `.help` - Show all commands
+- `.helpme` - Show all commands
 
 ## Database
 
