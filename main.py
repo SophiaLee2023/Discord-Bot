@@ -965,13 +965,14 @@ def generate_heatmap(daily_stats, start_date):
         if all(cell == '⬜' for cell in cells):
             continue
         end_dt = start_dt + timedelta(days=len(cells) - 1)
-        visible_weeks.append(f'{week_label(start_dt, end_dt)}\n{cells}')
+        label = week_label(start_dt, end_dt)
+        visible_weeks.append(f'{label:<14} {cells}')
 
     if not visible_weeks:
         return f'No tracked time in this period.\n⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
 
     legend = '⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
-    return f"{'\n\n'.join(visible_weeks)}\n\n{legend}"
+    return f"{'\n'.join(visible_weeks)}\n{legend}"
 
 def calculate_streak(daily_stats):
     if not daily_stats:
