@@ -1103,8 +1103,8 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
                    activities.name AS activity_name,
                    {session_duration_seconds_sql()} AS duration_seconds,
                    CASE
-                       WHEN sessions.paused_at IS NOT NULL THEN 'Paused'
-                       WHEN sessions.clock_in IS NOT NULL THEN 'In progress'
+                       WHEN sessions.paused_at IS NOT NULL AND sessions.clock_out IS NULL THEN 'Paused'
+                       WHEN sessions.clock_in IS NOT NULL AND sessions.clock_out IS NULL THEN 'In progress'
                        ELSE NULL
                    END AS state
             FROM sessions
