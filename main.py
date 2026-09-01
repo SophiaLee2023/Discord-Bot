@@ -812,11 +812,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             embeds.append(embed_metrics)
 
         conn.close()
-        for idx, embed in enumerate(embeds):
-            if idx == 0:
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embeds=embeds, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f'Error: {str(e)}', ephemeral=True)
 
@@ -925,6 +921,7 @@ def generate_heatmap(daily_stats, start_date):
     now_date = datetime.now().date()
     weeks = []
     current_week = []
+    week_start = start_date
 
     start_weekday = start_date.weekday()
     for _ in range(start_weekday):
@@ -949,17 +946,32 @@ def generate_heatmap(daily_stats, start_date):
         current_week.append(square)
 
         if len(current_week) == 7:
-            weeks.append(''.join(current_week))
+            weeks.append((week_start, ''.join(current_week)))
+            week_start = current_date + timedelta(days=1)
             current_week = []
 
         current_date += timedelta(days=1)
 
     if current_week:
-        weeks.append(''.join(current_week))
+        weeks.append((week_start, ''.join(current_week)))
 
-    heatmap_str = '\n'.join(weeks[-12:])
+    def week_label(start_dt, end_dt):
+        if start_dt.month == end_dt.month:
+            return f"{start_dt.strftime('%b.') } {start_dt.day}-{end_dt.day}"
+        return f"{start_dt.strftime('%b.')} {start_dt.day}-{end_dt.strftime('%b.')} {end_dt.day}"
+
+    visible_weeks = []
+    for start_dt, cells in weeks:
+        if all(cell == '⬜' for cell in cells):
+            continue
+        end_dt = start_dt + timedelta(days=len(cells) - 1)
+        visible_weeks.append(f'{week_label(start_dt, end_dt)}\n{cells}')
+
+    if not visible_weeks:
+        return f'No tracked time in this period.\n⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
+
     legend = '⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
-    return f'{heatmap_str}\n{legend}'
+    return f"{'\n\n'.join(visible_weeks)}\n\n{legend}"
 
 def calculate_streak(daily_stats):
     if not daily_stats:
@@ -1156,11 +1168,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
                 embed.add_field(name=f'📅 {date}', value=value, inline=False)
             embeds.append(embed)
 
-        for index, embed in enumerate(embeds):
-            if index == 0:
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embeds=embeds, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
