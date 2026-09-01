@@ -64,9 +64,17 @@ All commands are slash commands and will appear in Discord's command preview whe
 - `/channel remove <channel>` - Remove channel restriction
 - `/channel list` - View all allowed channels (if none set, bot works everywhere)
 
-### Time Entry Management (Admin Only)
-- `/time add <user> <activity> <minutes> [date]` - Add time to a user in minutes (date: YYYY-MM-DD HH:MM, YYYY-MM-DD, today, yesterday; defaults to now)
-- `/time remove <user> <activity> <minutes> [date]` - Remove time from a user in minutes (date: YYYY-MM-DD HH:MM, YYYY-MM-DD, today, yesterday; defaults to now)
+### Sessions
+- `/session add <H:M:S> [YYYY-MM-DD] [activity] [user]` - Add a session with duration (H:M:S) for a given date (defaults to today). Admins may add for other users.
+- `/session remove <id> [user]` - Remove a session by its numeric session id. Only the session owner or an admin may remove others' sessions.
+- `/session edit <id> [date] [H:M:S]` - Edit a session's date and/or duration. Use `YYYY-MM-DD` for date and `H:M:S` for duration. Only the session owner or an admin may edit other users' sessions.
+- `/session list [user]` - List sessions grouped by date (defaults to yourself). Each session line includes its numeric id for use with `/session remove` and `/session edit`. This list is visible only to the requesting user.
+
+### Quotes
+- `/quote add <string>` - Add a new quote (visible only to the adding user).
+- `/quote remove <id>` - Remove a quote by id (admin only).
+- `/quote list` - List all quotes (visible only to the requesting user).
+- `/gnaij` - Returns a random quote (visible only to the requesting user).
 
 ### Help
 - `/commands` - Show all available commands organized by category
@@ -75,7 +83,7 @@ All commands are slash commands and will appear in Discord's command preview whe
 
 The bot uses SQLite (`time_tracker.db`) to store:
 - **Activities**: List of activities to track
-- **Time Entries**: Clock in/out records with timestamps per user
+- **Sessions**: Per-day session records (date + duration in seconds) used for manual entries and migrated historical data
 
 ## Example Workflow
 

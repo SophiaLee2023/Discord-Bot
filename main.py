@@ -1,5 +1,7 @@
 import os
+import glob
 import sqlite3
+from helpers import parse_hms_to_seconds, format_time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import discord
@@ -14,7 +16,32 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 
-DB_PATH = 'time_tracker.db'
+
+def find_db_path(preferred='time_tracker.db'):
+    # Prefer explicit file if it exists
+    if os.path.exists(preferred):
+        return preferred
+
+    # Fallback: accept any legacy .db file in cwd
+    dbs = glob.glob('*.db')
+    if dbs:
+        # pick the first one found (legacy compatibility)
+        return dbs[0]
+
+    # default
+    return preferred
+
+
+DB_PATH = find_db_path()
+
+
+def session_duration_seconds_sql(alias: str = 'sessions') -> str:
+    """Return SQL for a duration, calculating only an open clocked-in session."""
+    return f'''CASE
+        WHEN {alias}.clock_in IS NOT NULL AND {alias}.clock_out IS NULL
+            THEN MAX(0, CAST((JULIANDAY(?) - JULIANDAY({alias}.clock_in)) * 86400 AS INTEGER))
+        ELSE {alias}.duration_seconds
+    END'''
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -29,16 +56,7 @@ def init_db():
         )
     ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS time_entries (
-            id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            activity_id INTEGER NOT NULL,
-            clock_in TIMESTAMP NOT NULL,
-            clock_out TIMESTAMP,
-            FOREIGN KEY (activity_id) REFERENCES activities (id)
-        )
-    ''')
+    # Legacy `time_entries` table removed; sessions table is used instead.
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS admin_roles (
@@ -58,13 +76,238 @@ def init_db():
         )
     ''')
 
+    # Guild settings (store default activity id etc.)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            id INTEGER PRIMARY KEY,
+            guild_id INTEGER UNIQUE NOT NULL,
+            default_activity_id INTEGER,
+            FOREIGN KEY (default_activity_id) REFERENCES activities (id)
+        )
+    ''')
+
+    # Sessions table: store per-day sessions (date only) with duration in seconds
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            activity_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            duration_seconds INTEGER NOT NULL,
+            clock_in TIMESTAMP,
+            clock_out TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (activity_id) REFERENCES activities (id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS quotes (
+            id INTEGER PRIMARY KEY,
+            text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
 def get_db():
+    # Always connect to DB_PATH (which may have been set to a legacy .db file)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def sync_db_schema(conn=None):
+    """Ensure expected tables/columns exist and migrate common legacy types.
+    This is safe to run multiple times.
+    """
+    close_conn = False
+    if conn is None:
+        conn = get_db()
+        close_conn = True
+    cursor = conn.cursor()
+
+    # Ensure activities.icon_data exists
+    cursor.execute("PRAGMA table_info(activities)")
+    cols = [r[1] for r in cursor.fetchall()]
+    if 'icon_data' not in cols:
+        try:
+            cursor.execute('ALTER TABLE activities ADD COLUMN icon_data TEXT')
+        except Exception:
+            pass
+
+    # Ensure guild_settings exists (created in init_db normally)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            id INTEGER PRIMARY KEY,
+            guild_id INTEGER UNIQUE NOT NULL,
+            default_activity_id INTEGER,
+            FOREIGN KEY (default_activity_id) REFERENCES activities (id)
+        )
+    ''')
+
+    # Normalize timestamp columns: if clock_in/clock_out are integers (epoch), convert to ISO strings
+    # If a legacy `time_entries` table exists, normalize integer epoch timestamps to ISO strings
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='time_entries'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(time_entries)")
+        te_cols = cursor.fetchall()
+        # attempt to detect type of clock_in column
+        col_info = {r[1]: r[2].upper() for r in te_cols}
+        if col_info.get('clock_in', '') in ('INTEGER', 'INT') or col_info.get('clock_out', '') in ('INTEGER', 'INT'):
+            # read all rows and convert epoch ints to ISO strings
+            cursor.execute('SELECT id, clock_in, clock_out FROM time_entries')
+            rows = cursor.fetchall()
+            for row in rows:
+                id_ = row['id']
+                ci = row['clock_in']
+                co = row['clock_out']
+                updates = {}
+                try:
+                    if ci is not None and isinstance(ci, int):
+                        updates['clock_in'] = datetime.fromtimestamp(ci).isoformat()
+                    elif ci is not None and isinstance(ci, str) and ci.isdigit():
+                        updates['clock_in'] = datetime.fromtimestamp(int(ci)).isoformat()
+                except Exception:
+                    pass
+                try:
+                    if co is not None and isinstance(co, int):
+                        updates['clock_out'] = datetime.fromtimestamp(co).isoformat()
+                    elif co is not None and isinstance(co, str) and co.isdigit():
+                        updates['clock_out'] = datetime.fromtimestamp(int(co)).isoformat()
+                except Exception:
+                    pass
+
+                if updates:
+                    set_clause = ', '.join([f"{k} = ?" for k in updates.keys()])
+                    params = list(updates.values()) + [id_]
+                    try:
+                        cursor.execute(f'UPDATE time_entries SET {set_clause} WHERE id = ?', params)
+                    except Exception:
+                        pass
+
+    # Ensure sessions has clock_in/clock_out columns for open sessions support
+    cursor.execute("PRAGMA table_info(sessions)")
+    sess_cols = [r[1] for r in cursor.fetchall()]
+    if 'clock_in' not in sess_cols:
+        try:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN clock_in TIMESTAMP')
+        except Exception:
+            pass
+    if 'clock_out' not in sess_cols:
+        try:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN clock_out TIMESTAMP')
+        except Exception:
+            pass
+
+    conn.commit()
+    if close_conn:
+        conn.close()
+
+
+def migrate_time_entries_to_sessions(conn=None):
+    """Migrate completed time_entries into sessions table.
+    Adds sessions.time_entry_id column if missing. Skips entries already migrated.
+    Returns dict with counts.
+    """
+    close_conn = False
+    if conn is None:
+        conn = get_db()
+        close_conn = True
+    cursor = conn.cursor()
+
+    # Ensure time_entry_id column exists on sessions
+    cursor.execute("PRAGMA table_info(sessions)")
+    cols = [r[1] for r in cursor.fetchall()]
+    if 'time_entry_id' not in cols:
+        try:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN time_entry_id INTEGER')
+            conn.commit()
+        except Exception:
+            pass
+
+    # Select all entries (completed and open)
+    cursor.execute('SELECT id, user_id, activity_id, clock_in, clock_out FROM time_entries')
+    rows = cursor.fetchall()
+
+    inserted = 0
+    skipped = 0
+    already = 0
+
+    for row in rows:
+        te_id = row['id']
+        # skip if already migrated
+        cursor.execute('SELECT 1 FROM sessions WHERE time_entry_id = ?', (te_id,))
+        if cursor.fetchone():
+            already += 1
+            continue
+
+        try:
+            ci_raw = row['clock_in']
+            co_raw = row['clock_out']
+            ci = None
+            co = None
+            if ci_raw:
+                ci = datetime.fromisoformat(ci_raw)
+            if co_raw:
+                co = datetime.fromisoformat(co_raw)
+
+            if ci and co:
+                duration = int(round((co - ci).total_seconds()))
+                date_str = ci.date().isoformat()
+                cursor.execute('INSERT INTO sessions (user_id, activity_id, date, duration_seconds, time_entry_id, clock_in, clock_out) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                               (row['user_id'], row['activity_id'], date_str, duration, te_id, ci.isoformat(), co.isoformat()))
+            elif ci and not co:
+                # open session: store clock_in, leave clock_out NULL and duration 0
+                date_str = ci.date().isoformat()
+                cursor.execute('INSERT INTO sessions (user_id, activity_id, date, duration_seconds, time_entry_id, clock_in) VALUES (?, ?, ?, ?, ?, ?)',
+                               (row['user_id'], row['activity_id'], date_str, 0, te_id, ci.isoformat()))
+            else:
+                # unexpected format, skip
+                skipped += 1
+                continue
+
+            inserted += 1
+        except Exception:
+            skipped += 1
+
+    conn.commit()
+
+    # After a successful migration, remove the legacy table.
+    try:
+        cursor.execute('DROP TABLE IF EXISTS time_entries')
+        conn.commit()
+    finally:
+        if close_conn:
+            conn.close()
+
+    return {'inserted': inserted, 'skipped': skipped, 'already': already, 'total': len(rows)}
+
+
+def get_default_activity_for_guild(guild_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT default_activity_id FROM guild_settings WHERE guild_id = ?', (guild_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row['default_activity_id'] if row else None
+
+
+def set_default_activity_for_guild(guild_id: int, activity_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO guild_settings (guild_id, default_activity_id) VALUES (?, ?)'
+                   ' ON CONFLICT(guild_id) DO UPDATE SET default_activity_id=excluded.default_activity_id', (guild_id, activity_id))
+    conn.commit()
+    conn.close()
+
+
+
+
+
+
 
 def is_admin(ctx):
     if ctx.guild is None:
@@ -112,13 +355,13 @@ async def on_ready():
         # Sync to all guilds first (instant update for testing)
         for guild in bot.guilds:
             synced = await bot.tree.sync(guild=guild)
-            print(f'✅ Synced {len(synced)} command(s) in {guild.name}')
+            print(f'Synced {len(synced)} command(s) in {guild.name}')
 
         # Also sync globally for new servers
         synced = await bot.tree.sync()
-        print(f'✅ Also synced globally ({len(synced)} commands)')
+        print(f'Also synced globally ({len(synced)} commands)')
     except Exception as e:
-        print(f'❌ Failed to sync commands: {type(e).__name__}: {e}')
+        print(f'Failed to sync commands: {type(e).__name__}: {e}')
         import traceback
         traceback.print_exc()
     print('Bot is ready.')
@@ -143,7 +386,7 @@ activity = app_commands.Group(name='activity', description='Manage activities')
 @app_commands.check(lambda i: check_channel(i))
 async def activity_create(interaction: discord.Interaction, name: str):
     if not is_admin_app(interaction):
-        await interaction.response.send_message('❌ You need to be an admin to use this command!', ephemeral=True)
+        await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
         return
 
     try:
@@ -152,13 +395,13 @@ async def activity_create(interaction: discord.Interaction, name: str):
         cursor.execute('INSERT INTO activities (name) VALUES (?)', (name,))
         conn.commit()
         conn.close()
-        embed = discord.Embed(description=f'✅ Activity **{name}** created!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Activity **{name}** created!', color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
     except sqlite3.IntegrityError:
-        embed = discord.Embed(description=f'❌ Activity **{name}** already exists!', color=discord.Color.red())
+        embed = discord.Embed(description=f'Activity **{name}** already exists!', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @activity.command(name='list', description='List all activities')
@@ -180,13 +423,13 @@ async def activity_list(interaction: discord.Interaction):
             embed.add_field(name=activity_row['name'], value='', inline=False)
         await interaction.response.send_message(embed=embed)
     except Exception as e:
-        await interaction.response.send_message(f'❌ Error: {str(e)}')
+        await interaction.response.send_message(f'Error: {str(e)}')
 
 @activity.command(name='delete', description='Delete an activity')
 @app_commands.check(lambda i: check_channel(i))
 async def activity_delete(interaction: discord.Interaction, name: str):
     if not is_admin_app(interaction):
-        await interaction.response.send_message('❌ You need to be an admin to use this command!', ephemeral=True)
+        await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
         return
 
     try:
@@ -196,7 +439,7 @@ async def activity_delete(interaction: discord.Interaction, name: str):
         activity_row = cursor.fetchone()
 
         if not activity_row:
-            embed = discord.Embed(description=f'❌ Activity **{name}** not found!', color=discord.Color.red())
+            embed = discord.Embed(description=f'Activity **{name}** not found!', color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
@@ -204,10 +447,10 @@ async def activity_delete(interaction: discord.Interaction, name: str):
         cursor.execute('DELETE FROM activities WHERE id = ?', (activity_row['id'],))
         conn.commit()
         conn.close()
-        embed = discord.Embed(description=f'✅ Activity **{name}** deleted!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Activity **{name}** deleted!', color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @activity.command(name='icon', description='Set an icon image for an activity')
@@ -215,11 +458,11 @@ async def activity_delete(interaction: discord.Interaction, name: str):
 @app_commands.check(lambda i: check_channel(i))
 async def activity_icon(interaction: discord.Interaction, name: str, image: discord.Attachment):
     if not is_admin_app(interaction):
-        await interaction.response.send_message('❌ You need to be an admin to use this command!', ephemeral=True)
+        await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
         return
 
     if not image.content_type or not image.content_type.startswith('image/'):
-        embed = discord.Embed(description='❌ Please attach an image file!', color=discord.Color.red())
+        embed = discord.Embed(description='Please attach an image file!', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
@@ -230,7 +473,7 @@ async def activity_icon(interaction: discord.Interaction, name: str, image: disc
         cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
         activity = cursor.fetchone()
         if not activity:
-            embed = discord.Embed(description=f'❌ Activity **{name}** not found!', color=discord.Color.red())
+            embed = discord.Embed(description=f'Activity **{name}** not found!', color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
@@ -239,122 +482,226 @@ async def activity_icon(interaction: discord.Interaction, name: str, image: disc
         conn.commit()
         conn.close()
 
-        embed = discord.Embed(description=f'✅ Icon set for **{name}**!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Icon set for **{name}**!', color=discord.Color.green())
         embed.set_image(url=image.url)
         await interaction.response.send_message(embed=embed)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 bot.tree.add_command(activity)
 
-@bot.tree.command(name='clockin', description='Clock in to an activity')
-@app_commands.describe(activity_name='Name of the activity', user='Optional: mention a member to clock in (admin only)')
+
+@activity.command(name='default', description='Set default activity for this server (optional name: unset)')
+@app_commands.describe(name='Name of the activity to set as default (omit to unset)')
 @app_commands.check(lambda i: check_channel(i))
-async def clockin(interaction: discord.Interaction, activity_name: str, user: discord.User = None):
+async def activity_default(interaction: discord.Interaction, name: str = None):
+    if not is_admin_app(interaction):
+        await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
+        return
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        if name:
+            cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                embed = discord.Embed(description=f'Activity **{name}** not found!', color=discord.Color.red())
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            set_default_activity_for_guild(interaction.guild.id, row['id'])
+            embed = discord.Embed(description=f'Default activity set to **{name}**', color=discord.Color.green())
+        else:
+            # unset
+            cursor.execute('DELETE FROM guild_settings WHERE guild_id = ?', (interaction.guild.id,))
+            conn.commit()
+            embed = discord.Embed(description='Default activity unset', color=discord.Color.green())
+        conn.close()
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name='clockin', description='Clock in to an activity')
+@app_commands.describe(activity_name='Optional: name of the activity', user='Optional: mention a member to clock in (admin only)')
+@app_commands.check(lambda i: check_channel(i))
+async def clockin(interaction: discord.Interaction, activity_name: str = None, user: discord.User = None):
     try:
         target_user = user if user else interaction.user
 
         if user and not is_admin_app(interaction):
-            await interaction.response.send_message('❌ Only admins can clock in other users!', ephemeral=True)
+            await interaction.response.send_message('Only admins can clock in other users!', ephemeral=True)
             return
 
         conn = get_db()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT id, name FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
-        activity = cursor.fetchone()
+        activity = None
+        if activity_name:
+            cursor.execute('SELECT id, name, icon_data FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
+            activity = cursor.fetchone()
+        else:
+            # try guild default
+            if interaction.guild:
+                default_id = get_default_activity_for_guild(interaction.guild.id)
+                if default_id:
+                    cursor.execute('SELECT id, name, icon_data FROM activities WHERE id = ?', (default_id,))
+                    activity = cursor.fetchone()
+            # fallback to first activity
+            if not activity:
+                cursor.execute('SELECT id, name, icon_data FROM activities ORDER BY id LIMIT 1')
+                activity = cursor.fetchone()
+
         if not activity:
-            embed = discord.Embed(description=f'❌ Activity **{activity_name}** not found!', color=discord.Color.red())
+            embed = discord.Embed(description=f'No activity specified and no default activities configured!', color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
 
         cursor.execute('''
-            SELECT id FROM time_entries
+            SELECT id FROM sessions
             WHERE user_id = ? AND clock_out IS NULL
         ''', (target_user.id,))
         active = cursor.fetchone()
 
         if active:
-            embed = discord.Embed(description=f'❌ {target_user.mention} is already clocked in! Clock out first with `/clockout`', color=discord.Color.red())
+            embed = discord.Embed(description=f'{target_user.mention} is already clocked in! Clock out first with `/clock out`', color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
 
+        now_iso = datetime.now().isoformat()
         cursor.execute('''
-            INSERT INTO time_entries (user_id, activity_id, clock_in)
-            VALUES (?, ?, ?)
-        ''', (target_user.id, activity['id'], datetime.now()))
+            INSERT INTO sessions (user_id, activity_id, date, duration_seconds, clock_in)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (target_user.id, activity['id'], datetime.now().date().isoformat(), 0, now_iso))
 
-        cursor.execute('SELECT icon_data FROM activities WHERE id = ?', (activity['id'],))
-        icon_row = cursor.fetchone()
+        icon_url = activity['icon_data'] if 'icon_data' in activity.keys() else None
         conn.commit()
         conn.close()
 
-        embed = discord.Embed(description=f'✅ {target_user.mention} clocked in to **{activity["name"]}**', color=discord.Color.green())
-        if icon_row and icon_row['icon_data']:
-            embed.set_image(url=icon_row['icon_data'])
-        await interaction.response.send_message(embed=embed)
+        embed = discord.Embed(description=f'{target_user.mention} clocked in to **{activity["name"]}**', color=discord.Color.green())
+        if icon_url:
+            embed.set_image(url=icon_url)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name='clockout', description='Clock out of current activity')
-@app_commands.describe(user='Optional: mention a member to clock out (admin only)')
+@bot.tree.command(name='clockout', description='Clock out of current activity (optional +H:M:S or -H:M:S to adjust)')
+@app_commands.describe(time='Optional time offset to add/subtract in H:M:S (e.g. 0:30:00 or +0:05:00 or -0:02:00)', user='Optional: mention a member to clock out (admin only)')
 @app_commands.check(lambda i: check_channel(i))
-async def clockout(interaction: discord.Interaction, user: discord.User = None):
+async def clockout(interaction: discord.Interaction, time: str = None, user: discord.User = None):
     try:
         target_user = user if user else interaction.user
 
         if user and not is_admin_app(interaction):
-            await interaction.response.send_message('❌ Only admins can clock out other users!', ephemeral=True)
+            await interaction.response.send_message('Only admins can clock out other users!', ephemeral=True)
             return
 
         conn = get_db()
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT time_entries.id, activities.name, time_entries.clock_in
-            FROM time_entries
-            JOIN activities ON time_entries.activity_id = activities.id
-            WHERE time_entries.user_id = ? AND time_entries.clock_out IS NULL
+            SELECT sessions.id, activities.name, sessions.clock_in
+            FROM sessions
+            JOIN activities ON sessions.activity_id = activities.id
+            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL
         ''', (target_user.id,))
         active = cursor.fetchone()
 
-        if not active:
-            embed = discord.Embed(description=f'❌ {target_user.mention} is not clocked in!', color=discord.Color.red())
-            await interaction.response.send_message(embed=embed)
+        delta_seconds = 0
+        if time:
+            try:
+                delta_seconds = parse_hms_to_seconds(time)
+            except ValueError:
+                embed = discord.Embed(description='Invalid time format! Use H:M:S', color=discord.Color.red())
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                conn.close()
+                return
+
+        if active:
+            # active session -> set clock_out to now +/- delta
+            clock_out_time = datetime.now() + timedelta(seconds=delta_seconds)
+            duration = clock_out_time - datetime.fromisoformat(active['clock_in'])
+            seconds = int(round(duration.total_seconds()))
+            if seconds < 0:
+                await interaction.response.send_message(
+                    'The adjustment cannot make a session end before it started.', ephemeral=True
+                )
+                conn.close()
+                return
+            cursor.execute('''
+                UPDATE sessions
+                SET clock_out = ?, duration_seconds = ?
+                WHERE id = ?
+            ''', (clock_out_time.isoformat(), seconds, active['id']))
+            conn.commit()
+            hours = duration.total_seconds() / 3600
+            time_str = format_time(hours)
+
+            cursor.execute(f'''
+                SELECT SUM({session_duration_seconds_sql()}) AS total_seconds
+                FROM sessions
+                WHERE user_id = ? AND activity_id = (SELECT id FROM activities WHERE name = ?)
+            ''', (clock_out_time.isoformat(), target_user.id, active['name']))
+            total_row = cursor.fetchone()
+            total_str = format_time((total_row['total_seconds'] or 0) / 3600)
             conn.close()
+
+            embed = discord.Embed(description=f'{target_user.mention} clocked out of **{active["name"]}**', color=discord.Color.green())
+            embed.add_field(name='Session', value=time_str, inline=True)
+            embed.add_field(name='Total', value=total_str, inline=True)
+            await interaction.response.send_message(embed=embed)
             return
 
-        cursor.execute('''
-            UPDATE time_entries
-            SET clock_out = ?
-            WHERE id = ?
-        ''', (datetime.now(), active['id']))
-        conn.commit()
+        # no active session
+        if time:
+            # adjust most recent entry's clock_out by delta
+            cursor.execute('''
+                SELECT id, clock_out, clock_in FROM sessions
+                WHERE user_id = ?
+                ORDER BY clock_in DESC LIMIT 1
+            ''', (target_user.id,))
+            last = cursor.fetchone()
+            if not last or not last['clock_out']:
+                embed = discord.Embed(description=f'No completed session found to adjust for {target_user.mention}', color=discord.Color.red())
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                conn.close()
+                return
 
-        duration = datetime.now() - datetime.fromisoformat(active['clock_in'])
-        hours = duration.total_seconds() / 3600
-        time_str = format_time(hours)
+            try:
+                current_co = datetime.fromisoformat(last['clock_out'])
+            except Exception:
+                embed = discord.Embed(description='Failed to parse existing clock_out timestamp', color=discord.Color.red())
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                conn.close()
+                return
 
-        cursor.execute('''
-            SELECT SUM(CAST((JULIANDAY(COALESCE(clock_out, ?)) - JULIANDAY(clock_in)) * 24 AS REAL)) as total_hours
-            FROM time_entries
-            WHERE user_id = ? AND activity_id = (SELECT id FROM activities WHERE name = ?)
-        ''', (datetime.now().isoformat(), target_user.id, active['name']))
-        total_row = cursor.fetchone()
-        total_hours = total_row['total_hours'] or 0
-        total_str = format_time(total_hours)
-        conn.close()
+            new_co = current_co + timedelta(seconds=delta_seconds)
+            # update both clock_out and duration_seconds
+            new_duration = int(round((new_co - datetime.fromisoformat(last['clock_in'])).total_seconds()))
+            if new_duration < 0:
+                await interaction.response.send_message(
+                    'The adjustment cannot make a session end before it started.', ephemeral=True
+                )
+                conn.close()
+                return
+            cursor.execute('UPDATE sessions SET clock_out = ?, duration_seconds = ? WHERE id = ?', (new_co.isoformat(), new_duration, last['id']))
+            conn.commit()
+            conn.close()
 
-        embed = discord.Embed(description=f'✅ {target_user.mention} clocked out of **{active["name"]}**', color=discord.Color.green())
-        embed.add_field(name='Session', value=time_str, inline=True)
-        embed.add_field(name='Total', value=total_str, inline=True)
+            embed = discord.Embed(description=f'Adjusted last session for {target_user.mention} by {time}', color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
+            return
+
+        embed = discord.Embed(description=f'{target_user.mention} is not clocked in!', color=discord.Color.red())
         await interaction.response.send_message(embed=embed)
+        conn.close()
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name='stats', description='View all your stats with heatmap')
@@ -371,73 +718,70 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
         embeds = []
 
         periods = [
-            ('today', now.replace(hour=0, minute=0, second=0, microsecond=0), 'Today'),
-            ('week', now - timedelta(days=now.weekday()), 'This Week'),
-            ('all', datetime.min, 'All-Time'),
+            ('today', now.date(), 'Today'),
+            ('week', (now - timedelta(days=now.weekday())).date(), 'This Week'),
+            ('all', None, 'All-Time'),
         ]
 
         embed_stats = discord.Embed(title=f"{user.name}'s Time Tracking", color=discord.Color.blurple())
 
-        for period, start_time, label in periods:
-            if period != 'all':
-                start_time = start_time.replace(hour=0, minute=0, second=0, microsecond=0)
-
-            cursor.execute('''
+        for _, start_date, label in periods:
+            cursor.execute(f'''
                 SELECT activities.name,
-                       SUM(CAST((JULIANDAY(COALESCE(time_entries.clock_out, ?)) - JULIANDAY(time_entries.clock_in)) * 24 AS REAL)) as hours
-                FROM time_entries
-                JOIN activities ON time_entries.activity_id = activities.id
-                WHERE time_entries.user_id = ? AND time_entries.clock_in >= ?
+                       SUM({session_duration_seconds_sql()}) AS seconds
+                FROM sessions
+                JOIN activities ON sessions.activity_id = activities.id
+                WHERE sessions.user_id = ? AND (? IS NULL OR sessions.date >= ?)
                 GROUP BY activities.name
-                ORDER BY hours DESC
-            ''', (now.isoformat(), user.id, start_time.isoformat()))
+                ORDER BY seconds DESC
+            ''', (now.isoformat(), user.id, start_date, start_date))
 
             stats_data = cursor.fetchall()
 
             if not stats_data:
                 embed_stats.add_field(name=label, value='No time tracked', inline=True)
             else:
-                total_hours = 0
+                total_seconds = 0
                 stats_text = ''
                 for row in stats_data:
-                    hours = row['hours'] or 0
-                    total_hours += hours
-                    stats_text += f"{row['name']}: {format_time(hours)}\n"
-                stats_text += f"\n**Total: {format_time(total_hours)}**"
+                    seconds = row['seconds'] or 0
+                    total_seconds += seconds
+                    stats_text += f"{row['name']}: {format_time(seconds / 3600)}\n"
+                stats_text += f"\n**Total: {format_time(total_seconds / 3600)}**"
                 embed_stats.add_field(name=label, value=stats_text, inline=True)
 
         embeds.append(embed_stats)
 
-        twelve_weeks_ago = now - timedelta(weeks=12)
-        cursor.execute('''
-            SELECT DATE(clock_in) as day,
-                   SUM(CAST((JULIANDAY(COALESCE(clock_out, ?)) - JULIANDAY(clock_in)) * 24 AS REAL)) as hours
-            FROM time_entries
-            WHERE user_id = ? AND clock_in >= ?
-            GROUP BY DATE(clock_in)
+        twelve_weeks_ago = (now - timedelta(weeks=12)).date()
+        cursor.execute(f'''
+            SELECT sessions.date AS day,
+                   SUM({session_duration_seconds_sql()}) AS seconds
+            FROM sessions
+            WHERE user_id = ? AND date >= ?
+            GROUP BY sessions.date
             ORDER BY day
         ''', (now.isoformat(), user.id, twelve_weeks_ago.isoformat()))
 
-        daily_stats = {row['day']: row['hours'] or 0 for row in cursor.fetchall()}
+        daily_stats = {row['day']: (row['seconds'] or 0) / 3600 for row in cursor.fetchall()}
 
         if daily_stats:
             heatmap = generate_heatmap(daily_stats, twelve_weeks_ago)
             embed_heatmap = discord.Embed(title='Activity Heatmap (Last 12 Weeks)', description=heatmap, color=discord.Color.green())
             embeds.append(embed_heatmap)
 
-            cursor.execute('''
-                SELECT strftime('%w', clock_in) as day_of_week,
-                       SUM(CAST((JULIANDAY(COALESCE(clock_out, ?)) - JULIANDAY(clock_in)) * 24 AS REAL)) as hours
-                FROM time_entries
+            cursor.execute(f'''
+                SELECT strftime('%w', date) AS day_of_week,
+                       SUM({session_duration_seconds_sql()}) AS seconds
+                FROM sessions
                 WHERE user_id = ?
                 GROUP BY day_of_week
-                ORDER BY hours DESC
+                ORDER BY seconds DESC
             ''', (now.isoformat(), user.id))
             day_of_week_stats = cursor.fetchall()
             days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
             most_active_day = days[int(day_of_week_stats[0]['day_of_week'])] if day_of_week_stats else 'N/A'
-            most_active_hours = day_of_week_stats[0]['hours'] or 0 if day_of_week_stats else 0
-            most_active_day += f' ({format_time(most_active_hours)})'
+            most_active_seconds = day_of_week_stats[0]['seconds'] or 0 if day_of_week_stats else 0
+            most_active_day += f' ({format_time(most_active_seconds / 3600)})'
 
             most_in_day = max(daily_stats.values())
             total_hours = sum(daily_stats.values())
@@ -452,10 +796,13 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             embeds.append(embed_metrics)
 
         conn.close()
-        for embed in embeds:
-            await interaction.followup.send(embed=embed) if interaction.response.is_done() else await interaction.response.send_message(embed=embed)
+        for idx, embed in enumerate(embeds):
+            if idx == 0:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f'❌ Error: {str(e)}', ephemeral=True)
+        await interaction.response.send_message(f'Error: {str(e)}', ephemeral=True)
 
 @bot.tree.command(name='status', description='View your current status')
 @app_commands.check(lambda i: check_channel(i))
@@ -465,17 +812,17 @@ async def status(interaction: discord.Interaction):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT activities.name, time_entries.clock_in
-            FROM time_entries
-            JOIN activities ON time_entries.activity_id = activities.id
-            WHERE time_entries.user_id = ? AND time_entries.clock_out IS NULL
+            SELECT activities.name, sessions.clock_in
+            FROM sessions
+            JOIN activities ON sessions.activity_id = activities.id
+            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL
         ''', (interaction.user.id,))
 
         active = cursor.fetchone()
         conn.close()
 
         if not active:
-            await interaction.response.send_message(f'You are currently **not clocked in**')
+            await interaction.response.send_message(f'You are currently **not clocked in**', ephemeral=True)
             return
 
         clock_in = datetime.fromisoformat(active['clock_in'])
@@ -485,9 +832,9 @@ async def status(interaction: discord.Interaction):
         embed = discord.Embed(title='Current Status', color=discord.Color.yellow())
         embed.add_field(name='Activity', value=active['name'], inline=False)
         embed.add_field(name='Duration', value=format_time(hours), inline=False)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f'❌ Error: {str(e)}')
+        await interaction.response.send_message(f'Error: {str(e)}')
 
 def generate_heatmap(daily_stats, start_date):
     now = datetime.now()
@@ -533,7 +880,6 @@ def calculate_streak(daily_stats):
     if not daily_stats:
         return 0
 
-    sorted_days = sorted(daily_stats.keys(), reverse=True)
     today = datetime.now().strftime('%Y-%m-%d')
 
     streak = 0
@@ -549,16 +895,7 @@ def calculate_streak(daily_stats):
 
     return streak
 
-def format_time(hours):
-    total_seconds = int(hours * 3600)
-    hours_part = total_seconds // 3600
-    minutes_part = (total_seconds % 3600) // 60
-    seconds_part = total_seconds % 60
 
-    if seconds_part == 0:
-        return f'{hours_part}h:{minutes_part:02d}m'
-    else:
-        return f'{hours_part}h:{minutes_part:02d}m:{seconds_part:02d}s'
 
 @bot.tree.command(name='leaderboard', description='View leaderboard for an activity')
 @app_commands.check(lambda i: check_channel(i))
@@ -570,18 +907,18 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
         cursor.execute('SELECT id, name FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
         activity = cursor.fetchone()
         if not activity:
-            embed = discord.Embed(description=f'❌ Activity **{activity_name}** not found!', color=discord.Color.red())
-            await interaction.response.send_message(embed=embed)
+            embed = discord.Embed(description=f'Activity **{activity_name}** not found!', color=discord.Color.red())
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
 
-        cursor.execute('''
-            SELECT time_entries.user_id,
-                   SUM(CAST((JULIANDAY(COALESCE(time_entries.clock_out, ?)) - JULIANDAY(time_entries.clock_in)) * 24 AS REAL)) as hours
-            FROM time_entries
-            WHERE time_entries.activity_id = ?
-            GROUP BY time_entries.user_id
-            ORDER BY hours DESC
+        cursor.execute(f'''
+            SELECT sessions.user_id,
+                   SUM({session_duration_seconds_sql()}) AS seconds
+            FROM sessions
+            WHERE sessions.activity_id = ?
+            GROUP BY sessions.user_id
+            ORDER BY seconds DESC
         ''', (datetime.now().isoformat(), activity['id']))
 
         results = cursor.fetchall()
@@ -589,15 +926,15 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
 
         if not results:
             embed = discord.Embed(description=f'No one has tracked time for **{activity["name"]}** yet!', color=discord.Color.greyple())
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         embed = discord.Embed(title=f'{activity["name"]} - Leaderboard', color=discord.Color.gold())
-        medals = ['🥇', '🥈', '🥉']
+        medals = ['1st', '2nd', '3rd']
 
         for idx, row in enumerate(results[:10]):
             user_id = row['user_id']
-            hours = row['hours'] or 0
+            hours = (row['seconds'] or 0) / 3600
             try:
                 user = await bot.fetch_user(user_id)
                 username = user.name
@@ -608,19 +945,20 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
             time_str = format_time(hours)
             embed.add_field(name=f'{medal} {username}', value=time_str, inline=False)
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 admin = app_commands.Group(name='admin', description='Manage admin roles')
+session = app_commands.Group(name='session', description='Manage sessions')
 
 @admin.command(name='add', description='Add an admin role')
 @app_commands.describe(role='Select a role to add as admin')
 @app_commands.check(lambda i: check_channel(i))
 async def admin_add(interaction: discord.Interaction, role: discord.Role):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message('❌ Only server admins can manage admin roles!', ephemeral=True)
+        await interaction.response.send_message('Only server admins can manage admin roles!', ephemeral=True)
         return
 
     try:
@@ -629,13 +967,13 @@ async def admin_add(interaction: discord.Interaction, role: discord.Role):
         cursor.execute('INSERT INTO admin_roles (guild_id, role_id) VALUES (?, ?)', (interaction.guild.id, role.id))
         conn.commit()
         conn.close()
-        embed = discord.Embed(description=f'✅ Added {role.mention} as an admin role!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Added {role.mention} as an admin role!', color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
     except sqlite3.IntegrityError:
-        embed = discord.Embed(description=f'❌ {role.mention} is already an admin role!', color=discord.Color.red())
+        embed = discord.Embed(description=f'{role.mention} is already an admin role!', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
+        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @admin.command(name='remove', description='Remove an admin role')
@@ -643,7 +981,7 @@ async def admin_add(interaction: discord.Interaction, role: discord.Role):
 @app_commands.check(lambda i: check_channel(i))
 async def admin_remove(interaction: discord.Interaction, role: discord.Role):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message('❌ Only server admins can manage admin roles!', ephemeral=True)
+        await interaction.response.send_message('Only server admins can manage admin roles!', ephemeral=True)
         return
 
     conn = get_db()
@@ -654,10 +992,10 @@ async def admin_remove(interaction: discord.Interaction, role: discord.Role):
     conn.close()
 
     if deleted:
-        embed = discord.Embed(description=f'✅ Removed {role.mention} from admin roles!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Removed {role.mention} from admin roles!', color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
     else:
-        embed = discord.Embed(description=f'❌ {role.mention} is not an admin role!', color=discord.Color.red())
+        embed = discord.Embed(description=f'{role.mention} is not an admin role!', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @admin.command(name='list', description='List all admin roles')
@@ -684,219 +1022,339 @@ async def admin_list(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-bot.tree.add_command(admin)
-
-channel = app_commands.Group(name='channel', description='Manage bot channels')
-
-@channel.command(name='add', description='Add a channel where the bot can work')
-@app_commands.describe(channel='Select a channel to allow bot access')
+@session.command(name='list', description='List recorded sessions for a user (optional, defaults to yourself)')
+@app_commands.describe(user='Optional: mention a member to list sessions for')
 @app_commands.check(lambda i: check_channel(i))
-async def channel_add(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message('❌ Only server admins can manage bot channels!', ephemeral=True)
+async def session_list(interaction: discord.Interaction, user: discord.User = None):
+    try:
+        target = user if user else interaction.user
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT sessions.id, sessions.date, sessions.duration_seconds, activities.name as activity_name
+            FROM sessions
+            JOIN activities ON sessions.activity_id = activities.id
+            WHERE sessions.user_id = ?
+            ORDER BY date ASC, sessions.id ASC
+        ''', (target.id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            await interaction.response.send_message(f'No sessions found for {target.mention}', ephemeral=True)
+            return
+
+        grouped = {}
+        for r in rows:
+            grouped.setdefault(r['date'], []).append(r)
+
+        lines = []
+        for date, items in grouped.items():
+            lines.append(f'**{date}**')
+            for idx, it in enumerate(items, start=1):
+                dur = it['duration_seconds']
+                dur_str = format_time(dur / 3600)
+                lines.append(f'{idx}. (id {it["id"]}) {it["activity_name"]} — {dur_str}')
+
+        embed = discord.Embed(title=f'Sessions for {target.display_name}', description='\n'.join(lines[:200]), color=discord.Color.blurple())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+@session.command(name='add', description='Add a session for a date (duration H:M:S)')
+@app_commands.describe(duration='Duration in H:M:S', date_str='Date (YYYY-MM-DD). Defaults to today', activity_name='Optional activity name', user='Optional: add for another user (admin only)')
+@app_commands.check(lambda i: check_channel(i))
+async def session_add(interaction: discord.Interaction, duration: str, date_str: str = None, activity_name: str = None, user: discord.User = None):
+    target_user = user if user else interaction.user
+    if user and not is_admin_app(interaction):
+        await interaction.response.send_message('Only admins can add sessions for other users!', ephemeral=True)
         return
 
     try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO allowed_channels (guild_id, channel_id) VALUES (?, ?)', (interaction.guild.id, channel.id))
-        conn.commit()
-        conn.close()
-        embed = discord.Embed(description=f'✅ Bot is now allowed in {channel.mention}', color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
-    except sqlite3.IntegrityError:
-        embed = discord.Embed(description=f'❌ Bot is already allowed in {channel.mention}!', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@channel.command(name='remove', description='Remove a channel where the bot can work')
-@app_commands.describe(channel='Select a channel to remove from bot access')
-@app_commands.check(lambda i: check_channel(i))
-async def channel_remove(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message('❌ Only server admins can manage bot channels!', ephemeral=True)
+        seconds = parse_hms_to_seconds(duration)
+    except Exception:
+        await interaction.response.send_message('Invalid duration format. Use H:M:S', ephemeral=True)
+        return
+    if seconds < 0:
+        await interaction.response.send_message('Session duration cannot be negative.', ephemeral=True)
         return
 
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM allowed_channels WHERE guild_id = ? AND channel_id = ?', (interaction.guild.id, channel.id))
-    conn.commit()
-    deleted = cursor.rowcount
-    conn.close()
-
-    if deleted:
-        embed = discord.Embed(description=f'✅ Bot is no longer allowed in {channel.mention}', color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
+    if date_str:
+        try:
+            date_obj = datetime.fromisoformat(date_str).date()
+        except Exception:
+            try:
+                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+            except Exception:
+                await interaction.response.send_message('Invalid date format. Use YYYY-MM-DD', ephemeral=True)
+                return
     else:
-        embed = discord.Embed(description=f'❌ Bot is not restricted to {channel.mention}', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        date_obj = datetime.now().date()
 
-@channel.command(name='list', description='List all allowed channels')
-@app_commands.check(lambda i: check_channel(i))
-async def channel_list(interaction: discord.Interaction):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT channel_id FROM allowed_channels WHERE guild_id = ?', (interaction.guild.id,))
-    channel_ids = [row['channel_id'] for row in cursor.fetchall()]
+
+    # find activity
+    activity = None
+    if activity_name:
+        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
+        activity = cursor.fetchone()
+        if not activity:
+            await interaction.response.send_message(f'Activity {activity_name} not found', ephemeral=True)
+            conn.close()
+            return
+    else:
+        if interaction.guild:
+            default_id = get_default_activity_for_guild(interaction.guild.id)
+            if default_id:
+                cursor.execute('SELECT id FROM activities WHERE id = ?', (default_id,))
+                activity = cursor.fetchone()
+        if not activity:
+            cursor.execute('SELECT id FROM activities ORDER BY id LIMIT 1')
+            activity = cursor.fetchone()
+
+    if not activity:
+        await interaction.response.send_message('No activity configured to attach the session to', ephemeral=True)
+        conn.close()
+        return
+
+    cursor.execute('INSERT INTO sessions (user_id, activity_id, date, duration_seconds) VALUES (?, ?, ?, ?)',
+                   (target_user.id, activity['id'], date_obj.isoformat(), seconds))
+    conn.commit()
     conn.close()
 
-    if not channel_ids:
-        embed = discord.Embed(description='No channel restrictions set! Bot works in all channels.', color=discord.Color.greyple())
-        await interaction.response.send_message(embed=embed)
-        return
+    await interaction.response.send_message(f'Session added for {target_user.mention} on {date_obj.isoformat()} ({duration})')
 
-    embed = discord.Embed(title='Allowed Bot Channels', color=discord.Color.blurple())
-    for channel_id in channel_ids:
-        ch = interaction.guild.get_channel(channel_id)
-        if ch:
-            embed.add_field(name=ch.mention, value='', inline=False)
-        else:
-            embed.add_field(name=f'Unknown Channel ({channel_id})', value='*Channel was deleted*', inline=False)
 
-    await interaction.response.send_message(embed=embed)
-
-bot.tree.add_command(channel)
-
-time = app_commands.Group(name='time', description='Manage time entries (admin only)')
-
-@time.command(name='add', description='Add time to a user for an activity')
-@app_commands.describe(user='Mention the member', activity_name='Name of the activity', minutes='Minutes to add', date_str='Optional date (YYYY-MM-DD, today, yesterday)')
+@session.command(name='remove', description='Remove a session by its numeric id')
+@app_commands.describe(id='Session id to remove', user='Optional: target user (admin only)')
 @app_commands.check(lambda i: check_channel(i))
-async def time_add(interaction: discord.Interaction, user: discord.User, activity_name: str, minutes: float, date_str: str = None):
-    if not is_admin_app(interaction):
-        await interaction.response.send_message('❌ Only admins can use this command!', ephemeral=True)
+async def session_remove(interaction: discord.Interaction, id: int, user: discord.User = None):
+    target_user = user if user else interaction.user
+    if user and not is_admin_app(interaction):
+        await interaction.response.send_message('Only admins can remove sessions for other users!', ephemeral=True)
         return
 
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, user_id, date, duration_seconds FROM sessions WHERE id = ?', (id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        await interaction.response.send_message('Session id not found', ephemeral=True)
+        return
+
+    if row['user_id'] != target_user.id and not is_admin_app(interaction):
+        conn.close()
+        await interaction.response.send_message('You can only remove your own sessions unless you are an admin.', ephemeral=True)
+        return
+
+    cursor.execute('DELETE FROM sessions WHERE id = ?', (id,))
+    conn.commit()
+    conn.close()
+
+    await interaction.response.send_message(f'Removed session id {id} for {target_user.mention}', ephemeral=True)
+
+
+@session.command(name='edit', description='Edit a session by id (change date and/or duration)')
+@app_commands.describe(id='Session id to edit', date='Optional new date (YYYY-MM-DD)', duration='Optional new duration (H:M:S)')
+@app_commands.check(lambda i: check_channel(i))
+async def session_edit(interaction: discord.Interaction, id: int, date: str = None, duration: str = None):
     try:
         conn = get_db()
         cursor = conn.cursor()
-
-        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
-        activity = cursor.fetchone()
-        if not activity:
-            embed = discord.Embed(description=f'❌ Activity **{activity_name}** not found!', color=discord.Color.red())
-            await interaction.response.send_message(embed=embed)
+        cursor.execute('SELECT id, user_id, date, duration_seconds FROM sessions WHERE id = ?', (id,))
+        row = cursor.fetchone()
+        if not row:
             conn.close()
+            await interaction.response.send_message('Session id not found', ephemeral=True)
             return
 
-        if date_str:
+        # permission: only owner or admin
+        if row['user_id'] != interaction.user.id and not is_admin_app(interaction):
+            conn.close()
+            await interaction.response.send_message('You can only edit your own sessions unless you are an admin.', ephemeral=True)
+            return
+
+        updates = []
+        params = []
+
+        if date:
             try:
-                clock_in = datetime.fromisoformat(date_str)
-            except:
+                date_obj = datetime.fromisoformat(date).date()
+            except Exception:
                 try:
-                    clock_in = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                except:
-                    try:
-                        if date_str.lower() == 'today':
-                            clock_in = datetime.now()
-                        elif date_str.lower() == 'yesterday':
-                            clock_in = datetime.now() - timedelta(days=1)
-                        else:
-                            clock_in = datetime.strptime(date_str, '%Y-%m-%d')
-                    except:
-                        embed = discord.Embed(description='❌ Invalid date format! Use: YYYY-MM-DD HH:MM or "today" or "yesterday"', color=discord.Color.red())
-                        await interaction.response.send_message(embed=embed)
-                        conn.close()
-                        return
-        else:
-            clock_in = datetime.now()
+                    date_obj = datetime.strptime(date, '%Y-%m-%d').date()
+                except Exception:
+                    conn.close()
+                    await interaction.response.send_message('Invalid date format. Use YYYY-MM-DD', ephemeral=True)
+                    return
+            updates.append('date = ?')
+            params.append(date_obj.isoformat())
 
-        clock_out = clock_in + timedelta(minutes=minutes)
+        if duration:
+            try:
+                seconds = parse_hms_to_seconds(duration)
+            except Exception:
+                conn.close()
+                await interaction.response.send_message('Invalid duration format. Use H:M:S', ephemeral=True)
+                return
+            if seconds < 0:
+                conn.close()
+                await interaction.response.send_message('Session duration cannot be negative.', ephemeral=True)
+                return
+            updates.append('duration_seconds = ?')
+            params.append(seconds)
 
-        cursor.execute('''
-            INSERT INTO time_entries (user_id, activity_id, clock_in, clock_out)
-            VALUES (?, ?, ?, ?)
-        ''', (user.id, activity['id'], clock_in.isoformat(), clock_out.isoformat()))
+        if not updates:
+            conn.close()
+            await interaction.response.send_message('Nothing to update. Provide `date` and/or `duration`.', ephemeral=True)
+            return
+
+        params.append(id)
+        sql = f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?"
+        cursor.execute(sql, tuple(params))
         conn.commit()
         conn.close()
 
-        embed = discord.Embed(description=f'✅ Added {minutes}m to {user.mention} for **{activity_name}** (recorded at {clock_in.strftime("%Y-%m-%d %H:%M")})', color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(f'Session {id} updated.', ephemeral=True)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(f'Error editing session: {e}', ephemeral=True)
 
-@time.command(name='remove', description='Remove time from a user for an activity')
-@app_commands.describe(user='Mention the member', activity_name='Name of the activity', minutes='Minutes to remove', date_str='Optional date (YYYY-MM-DD, today, yesterday)')
+
+bot.tree.add_command(session)
+
+
+quote = app_commands.Group(name='quote', description='Manage quotes')
+
+
+@quote.command(name='add', description='Add a new quote')
+@app_commands.describe(text='The quote text to add')
 @app_commands.check(lambda i: check_channel(i))
-async def time_remove(interaction: discord.Interaction, user: discord.User, activity_name: str, minutes: float, date_str: str = None):
-    if not is_admin_app(interaction):
-        await interaction.response.send_message('❌ Only admins can use this command!', ephemeral=True)
-        return
-
+async def quote_add(interaction: discord.Interaction, text: str):
     try:
         conn = get_db()
         cursor = conn.cursor()
-
-        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
-        activity = cursor.fetchone()
-        if not activity:
-            embed = discord.Embed(description=f'❌ Activity **{activity_name}** not found!', color=discord.Color.red())
-            await interaction.response.send_message(embed=embed)
-            conn.close()
-            return
-
-        if date_str:
-            try:
-                target_date = datetime.fromisoformat(date_str)
-            except:
-                try:
-                    target_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                except:
-                    try:
-                        if date_str.lower() == 'today':
-                            target_date = datetime.now()
-                        elif date_str.lower() == 'yesterday':
-                            target_date = datetime.now() - timedelta(days=1)
-                        else:
-                            target_date = datetime.strptime(date_str, '%Y-%m-%d')
-                    except:
-                        embed = discord.Embed(description='❌ Invalid date format! Use: YYYY-MM-DD HH:MM or "today" or "yesterday"', color=discord.Color.red())
-                        await interaction.response.send_message(embed=embed)
-                        conn.close()
-                        return
-
-            cursor.execute('''
-                SELECT id FROM time_entries
-                WHERE user_id = ? AND activity_id = ? AND DATE(clock_in) = DATE(?)
-                ORDER BY clock_in DESC LIMIT 1
-            ''', (user.id, activity['id'], target_date.isoformat()))
-        else:
-            cursor.execute('''
-                SELECT id FROM time_entries
-                WHERE user_id = ? AND activity_id = ?
-                ORDER BY clock_in DESC LIMIT 1
-            ''', (user.id, activity['id']))
-
-        entry = cursor.fetchone()
-        if not entry:
-            embed = discord.Embed(description=f'❌ No time entry found for {user.mention} on **{activity_name}**', color=discord.Color.red())
-            await interaction.response.send_message(embed=embed)
-            conn.close()
-            return
-
-        cursor.execute('''
-            UPDATE time_entries
-            SET clock_out = DATETIME(clock_out, '-' || ? || ' minutes')
-            WHERE id = ?
-        ''', (minutes, entry['id']))
+        cursor.execute('INSERT INTO quotes (text) VALUES (?)', (text,))
         conn.commit()
         conn.close()
-
-        embed = discord.Embed(description=f'✅ Removed {minutes}m from {user.mention} for **{activity_name}**', color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message('Quote added.', ephemeral=True)
     except Exception as e:
-        embed = discord.Embed(description=f'❌ Error: {str(e)}', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
-bot.tree.add_command(time)
 
+@quote.command(name='remove', description='Remove a quote by id')
+@app_commands.describe(id='Quote id to remove')
+@app_commands.check(lambda i: check_channel(i))
+async def quote_remove(interaction: discord.Interaction, id: int):
+    if not is_admin_app(interaction):
+        await interaction.response.send_message('Only admins can remove quotes.', ephemeral=True)
+        return
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM quotes WHERE id = ?', (id,))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted:
+            await interaction.response.send_message('Quote removed.', ephemeral=True)
+        else:
+            await interaction.response.send_message('Quote not found.', ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+@quote.command(name='list', description='List all quotes')
+@app_commands.check(lambda i: check_channel(i))
+async def quote_list(interaction: discord.Interaction):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, text FROM quotes ORDER BY id ASC')
+        rows = cursor.fetchall()
+        conn.close()
+        if not rows:
+            await interaction.response.send_message('No quotes found.', ephemeral=True)
+            return
+        lines = [f"{r['id']}. {r['text']}" for r in rows]
+        await interaction.response.send_message('\n'.join(lines[:200]), ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+bot.tree.add_command(quote)
+
+
+@bot.tree.command(name='gnaij', description='Say a random quote')
+@app_commands.check(lambda i: check_channel(i))
+async def gnaij(interaction: discord.Interaction):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, text FROM quotes ORDER BY RANDOM() LIMIT 1')
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            await interaction.response.send_message('No quotes available.', ephemeral=True)
+            return
+        # Public message
+        await interaction.response.send_message(row['text'])
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 @bot.tree.command(name='say', description='Make the bot say something')
 @app_commands.check(lambda i: check_channel(i))
 async def say(interaction: discord.Interaction, message: str):
     await interaction.response.send_message(message)
+
+
+@activity.command(name='whatif', description='Estimate earnings for an activity at given hourly wage')
+@app_commands.describe(activity_name='Activity name to evaluate', wage='Hourly wage (e.g. 10.5)')
+@app_commands.check(lambda i: check_channel(i))
+async def activity_whatif(interaction: discord.Interaction, activity_name: str, wage: float):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name FROM activities WHERE LOWER(name) = LOWER(?)', (activity_name,))
+        activity = cursor.fetchone()
+        if not activity:
+            conn.close()
+            await interaction.response.send_message(f'Activity **{activity_name}** not found!', ephemeral=True)
+            return
+
+        # Sum duration per user in hours using sessions
+        cursor.execute(f'''
+            SELECT sessions.user_id, SUM({session_duration_seconds_sql()}) AS seconds
+            FROM sessions
+            WHERE sessions.activity_id = ?
+            GROUP BY sessions.user_id
+            ORDER BY seconds DESC
+        ''', (datetime.now().isoformat(), activity['id']))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            await interaction.response.send_message(f'No recorded sessions for **{activity["name"]}**', ephemeral=True)
+            return
+
+        lines = [f'What-if for **{activity["name"]}** at ${wage:.2f}/hr:']
+        for r in rows:
+            uid = r['user_id']
+            hours = (r['seconds'] or 0) / 3600
+            earnings = hours * wage
+            try:
+                user = await bot.fetch_user(uid)
+                uname = user.name
+            except:
+                uname = f'User {uid}'
+            lines.append(f'{uname}: {format_time(hours)} → ${earnings:,.2f}')
+
+        # send ephemeral
+        await interaction.response.send_message('\n'.join(lines[:200]), ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
 @bot.tree.command(name='commands', description='Show all available commands')
 @app_commands.check(lambda i: check_channel(i))
@@ -929,9 +1387,11 @@ async def commands_help(interaction: discord.Interaction):
             ('/channel remove #channel', 'Remove channel restriction'),
             ('/channel list', 'List allowed channels'),
         ]),
-        ('Time Management', [
-            ('/time add @user <activity> <minutes> [date]', 'Add time to a user (admin only)'),
-            ('/time remove @user <activity> <minutes> [date]', 'Remove time from a user (admin only)'),
+        ('Sessions', [
+            ('/session add <H:M:S> [YYYY-MM-DD] [activity] [user]', 'Add a session (duration H:M:S) for a date'),
+            ('/session remove <id> [user]', 'Remove a session by numeric id'),
+            ('/session edit <id> [date] [H:M:S]', 'Edit a session by id (change date and/or duration)'),
+            ('/session list [user]', 'List sessions (defaults to yourself)'),
         ]),
     ]
 
@@ -943,4 +1403,5 @@ async def commands_help(interaction: discord.Interaction):
 
 if __name__ == '__main__':
     init_db()
+    sync_db_schema()
     bot.run(TOKEN)
