@@ -1048,10 +1048,10 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
         lines = []
         for date, items in grouped.items():
             lines.append(f'**{date}**')
-            for idx, it in enumerate(items, start=1):
+            for it in items:
                 dur = it['duration_seconds']
                 dur_str = format_time(dur / 3600)
-                lines.append(f'{idx}. (id {it["id"]}) {it["activity_name"]} — {dur_str}')
+                lines.append(f'#{it["id"]} {it["activity_name"]} — {dur_str}')
 
         embed = discord.Embed(title=f'Sessions for {target.display_name}', description='\n'.join(lines[:200]), color=discord.Color.blurple())
         await interaction.response.send_message(embed=embed, ephemeral=True)
