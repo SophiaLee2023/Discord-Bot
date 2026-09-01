@@ -382,9 +382,9 @@ def check_channel(interaction: discord.Interaction) -> bool:
 
 activity = app_commands.Group(name='activity', description='Manage activities')
 
-@activity.command(name='create', description='Create a new activity/commitment to track')
+@activity.command(name='add', description='Add a new activity/commitment to track')
 @app_commands.check(lambda i: check_channel(i))
-async def activity_create(interaction: discord.Interaction, name: str):
+async def activity_add(interaction: discord.Interaction, name: str):
     if not is_admin_app(interaction):
         await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
         return
@@ -395,7 +395,7 @@ async def activity_create(interaction: discord.Interaction, name: str):
         cursor.execute('INSERT INTO activities (name) VALUES (?)', (name,))
         conn.commit()
         conn.close()
-        embed = discord.Embed(description=f'Activity **{name}** created!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Activity **{name}** added!', color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
     except sqlite3.IntegrityError:
         embed = discord.Embed(description=f'Activity **{name}** already exists!', color=discord.Color.red())
@@ -404,30 +404,9 @@ async def activity_create(interaction: discord.Interaction, name: str):
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@activity.command(name='list', description='List all activities')
+@activity.command(name='remove', description='Remove an activity')
 @app_commands.check(lambda i: check_channel(i))
-async def activity_list(interaction: discord.Interaction):
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, name FROM activities ORDER BY name')
-        activities = cursor.fetchall()
-        conn.close()
-
-        if not activities:
-            await interaction.response.send_message('No activities found. Create one with `/activity create`')
-            return
-
-        embed = discord.Embed(title='Activities', color=discord.Color.blue())
-        for activity_row in activities:
-            embed.add_field(name=activity_row['name'], value='', inline=False)
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f'Error: {str(e)}')
-
-@activity.command(name='delete', description='Delete an activity')
-@app_commands.check(lambda i: check_channel(i))
-async def activity_delete(interaction: discord.Interaction, name: str):
+async def activity_remove(interaction: discord.Interaction, name: str):
     if not is_admin_app(interaction):
         await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
         return
@@ -447,11 +426,32 @@ async def activity_delete(interaction: discord.Interaction, name: str):
         cursor.execute('DELETE FROM activities WHERE id = ?', (activity_row['id'],))
         conn.commit()
         conn.close()
-        embed = discord.Embed(description=f'Activity **{name}** deleted!', color=discord.Color.green())
+        embed = discord.Embed(description=f'Activity **{name}** removed!', color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
     except Exception as e:
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@activity.command(name='list', description='List all activities')
+@app_commands.check(lambda i: check_channel(i))
+async def activity_list(interaction: discord.Interaction):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name FROM activities ORDER BY name')
+        activities = cursor.fetchall()
+        conn.close()
+
+        if not activities:
+            await interaction.response.send_message('No activities found. Add one with `/activity add`')
+            return
+
+        embed = discord.Embed(title='Activities', color=discord.Color.blue())
+        for activity_row in activities:
+            embed.add_field(name=activity_row['name'], value='', inline=False)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {str(e)}')
 
 @activity.command(name='icon', description='Set an icon image for an activity')
 @app_commands.describe(name='Name of the activity', image='Image to use as icon')
@@ -488,9 +488,6 @@ async def activity_icon(interaction: discord.Interaction, name: str, image: disc
     except Exception as e:
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-bot.tree.add_command(activity)
-
 
 @activity.command(name='default', description='Set default activity for this server (optional name: unset)')
 @app_commands.describe(name='Name of the activity to set as default (omit to unset)')
@@ -1356,6 +1353,9 @@ async def activity_whatif(interaction: discord.Interaction, activity_name: str, 
     except Exception as e:
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
+
+bot.tree.add_command(activity)
+
 @bot.tree.command(name='commands', description='Show all available commands')
 @app_commands.check(lambda i: check_channel(i))
 async def commands_help(interaction: discord.Interaction):
@@ -1363,9 +1363,9 @@ async def commands_help(interaction: discord.Interaction):
 
     sections = [
         ('Activity Management', [
-            ('/activity create <name>', 'Create a new activity (admin only)'),
+            ('/activity add <name>', 'Add a new activity (admin only)'),
+            ('/activity remove <name>', 'Remove an activity (admin only)'),
             ('/activity list', 'List all activities'),
-            ('/activity delete <name>', 'Delete an activity (admin only)'),
             ('/activity icon <name> <image>', 'Set an icon for an activity (admin only)'),
         ]),
         ('Time Tracking', [

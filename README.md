@@ -4,7 +4,7 @@ A Discord bot for tracking time spent on activities/commitments with per-user st
 
 ## Features
 
-- **Activity Management**: Create and list activities to track
+- **Activity Management**: Add and list activities to track
 - **Time Tracking**: Clock in/out of activities
 - **Per-User Tracking**: Each user tracks their own time
 - **Statistics**: View time tracked for:
@@ -40,9 +40,9 @@ A Discord bot for tracking time spent on activities/commitments with per-user st
 All commands are slash commands and will appear in Discord's command preview when you type `/`.
 
 ### Activity Management
-- `/activity create <name>` - Create a new activity (admin only)
+- `/activity add <name>` - Add a new activity (admin only)
+- `/activity remove <name>` - Remove an activity (admin only)
 - `/activity list` - List all activities
-- `/activity delete <name>` - Delete an activity (admin only)
 - `/activity icon <name> <image>` - Set an icon for an activity (admin only)
 
 ### Time Tracking
@@ -89,9 +89,9 @@ The bot uses SQLite (`time_tracker.db`) to store:
 
 1. Create activities:
    ```
-   /activity create Work
-   /activity create Exercise
-   /activity create Reading
+   /activity add Work
+   /activity add Exercise
+   /activity add Reading
    ```
 
 2. View available activities:
