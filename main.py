@@ -760,10 +760,14 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             else:
                 total_seconds = 0
                 stats_text = ''
+                single_activity = len(stats_data) == 1
                 for row in stats_data:
                     seconds = row['seconds'] or 0
                     total_seconds += seconds
-                    stats_text += f"{row['name']}: {format_time(seconds / 3600)}\n"
+                    if single_activity:
+                        stats_text += f"{format_time(seconds / 3600)}\n"
+                    else:
+                        stats_text += f"{row['name']}: {format_time(seconds / 3600)}\n"
 
                 if len(stats_data) > 1:
                     stats_text += f"\n**Total: {format_time(total_seconds / 3600)}**"
@@ -791,6 +795,18 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             embeds.append(embed_heatmap)
 
             cursor.execute(f'''
+                SELECT activities.name,
+                       SUM({session_duration_seconds_sql()}) AS seconds
+                FROM sessions
+                JOIN activities ON sessions.activity_id = activities.id
+                WHERE sessions.user_id = ?
+                GROUP BY activities.name
+                ORDER BY seconds DESC, activities.name ASC
+                LIMIT 1
+            ''', (now.isoformat(), user.id))
+            favorite_activity = cursor.fetchone()
+
+            cursor.execute(f'''
                 SELECT strftime('%w', date) AS day_of_week,
                        SUM({session_duration_seconds_sql()}) AS seconds
                 FROM sessions
@@ -814,6 +830,8 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             embed_metrics.add_field(name='Max Day', value=format_time(most_in_day), inline=True)
             embed_metrics.add_field(name='Daily Avg', value=format_time(avg_per_day), inline=True)
             embed_metrics.add_field(name='Most Active', value=most_active_day, inline=True)
+            if favorite_activity:
+                embed_metrics.add_field(name='Favorite Activity', value=f"{favorite_activity['name']} ({format_time((favorite_activity['seconds'] or 0) / 3600)})", inline=True)
             embeds.append(embed_metrics)
 
         conn.close()
@@ -962,23 +980,23 @@ def generate_heatmap(daily_stats, start_date):
 
     def week_label(start_dt, end_dt):
         if start_dt.month == end_dt.month:
-            return f"{start_dt.strftime('%b.') } {start_dt.day}-{end_dt.day}"
+            return f"{start_dt.strftime('%b.')} {start_dt.day}-{end_dt.day}"
         return f"{start_dt.strftime('%b.')} {start_dt.day}-{end_dt.strftime('%b.')} {end_dt.day}"
 
-    max_label_width = max(len(week_label(start_dt, start_dt + timedelta(days=len(cells) - 1))) for start_dt, cells in weeks if any(cell != '⬜' for cell in cells))
-    visible_weeks = []
+    visible_rows = []
     for start_dt, cells in weeks:
         if all(cell == '⬜' for cell in cells):
             continue
         end_dt = start_dt + timedelta(days=len(cells) - 1)
-        label = week_label(start_dt, end_dt)
-        visible_weeks.append(f'{label:<{max_label_width}}  {cells}')
+        visible_rows.append((week_label(start_dt, end_dt), cells))
 
-    if not visible_weeks:
-        return f'No tracked time in this period.\n⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
+    if not visible_rows:
+        return '```\nNo tracked time in this period.\n⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+\n```'
 
+    max_label_width = max(len(label) for label, _ in visible_rows)
+    padded_rows = [f"{label:<{max_label_width}} | {cells}" for label, cells in visible_rows]
     legend = '⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
-    return f"{'\n'.join(visible_weeks)}\n{legend}"
+    return f"```\n{'\n'.join(padded_rows)}\n{legend}\n```"
 
 def calculate_streak(daily_stats):
     if not daily_stats:
@@ -1158,7 +1176,8 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             await interaction.response.send_message(f'No sessions found for {target.mention}', ephemeral=True)
             return
 
-        fields = build_session_list_fields(rows)
+        unique_activities = {row['activity_name'] for row in rows}
+        fields = build_session_list_fields(rows, hide_activity_name=len(unique_activities) == 1)
 
         embeds = []
         for start in range(0, len(fields), 25):

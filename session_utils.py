@@ -27,7 +27,7 @@ def parse_session_ids(value: str) -> list[int]:
     return ids
 
 
-def build_session_list_fields(rows: Iterable[Mapping[str, object]]) -> list[tuple[str, str]]:
+def build_session_list_fields(rows: Iterable[Mapping[str, object]], hide_activity_name: bool = False) -> list[tuple[str, str]]:
     """Group session rows by date and split field values within Discord's limit."""
     grouped: dict[str, list[Mapping[str, object]]] = {}
     for row in rows:
@@ -38,10 +38,13 @@ def build_session_list_fields(rows: Iterable[Mapping[str, object]]) -> list[tupl
         lines = []
         for session in sessions:
             state = f' ({session["state"]})' if session['state'] else ''
-            entry = (
-                f'**#{session["id"]}** · {session["activity_name"]} — '
-                f'{format_time(float(session["duration_seconds"]) / 3600)}{state}'
-            )
+            if hide_activity_name:
+                entry = f'**#{session["id"]}** — {format_time(float(session["duration_seconds"]) / 3600)}{state}'
+            else:
+                entry = (
+                    f'**#{session["id"]}** · {session["activity_name"]} — '
+                    f'{format_time(float(session["duration_seconds"]) / 3600)}{state}'
+                )
             if session['note']:
                 entry += f'  • {session["note"]}'
             lines.append(entry)
