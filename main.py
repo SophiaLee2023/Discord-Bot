@@ -729,15 +729,27 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
         embed_stats = discord.Embed(title=f"{user.name}'s Time Tracking", color=discord.Color.blurple())
 
         for _, start_date, label in periods:
-            cursor.execute(f'''
-                SELECT activities.name,
-                       SUM({session_duration_seconds_sql()}) AS seconds
-                FROM sessions
-                JOIN activities ON sessions.activity_id = activities.id
-                WHERE sessions.user_id = ? AND (? IS NULL OR sessions.date >= ?)
-                GROUP BY activities.name
-                ORDER BY seconds DESC
-            ''', (now.isoformat(), user.id, start_date, start_date))
+            if start_date is None:
+                cursor.execute(f'''
+                    SELECT activities.name,
+                           SUM({session_duration_seconds_sql()}) AS seconds
+                    FROM sessions
+                    JOIN activities ON sessions.activity_id = activities.id
+                    WHERE sessions.user_id = ?
+                    GROUP BY activities.name
+                    ORDER BY seconds DESC
+                ''', (user.id, now.isoformat()))
+            else:
+                start_iso = start_date.isoformat()
+                cursor.execute(f'''
+                    SELECT activities.name,
+                           SUM({session_duration_seconds_sql()}) AS seconds
+                    FROM sessions
+                    JOIN activities ON sessions.activity_id = activities.id
+                    WHERE sessions.user_id = ? AND sessions.date >= ?
+                    GROUP BY activities.name
+                    ORDER BY seconds DESC
+                ''', (user.id, start_iso, now.isoformat()))
 
             stats_data = cursor.fetchall()
 
@@ -756,6 +768,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
         embeds.append(embed_stats)
 
         twelve_weeks_ago = (now - timedelta(weeks=12)).date()
+        start_iso = twelve_weeks_ago.isoformat()
         cursor.execute(f'''
             SELECT sessions.date AS day,
                    SUM({session_duration_seconds_sql()}) AS seconds
@@ -763,7 +776,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             WHERE user_id = ? AND date >= ?
             GROUP BY sessions.date
             ORDER BY day
-        ''', (now.isoformat(), user.id, twelve_weeks_ago.isoformat()))
+        ''', (user.id, start_iso, now.isoformat()))
 
         daily_stats = {row['day']: (row['seconds'] or 0) / 3600 for row in cursor.fetchall()}
 
@@ -909,7 +922,7 @@ async def resume(interaction: discord.Interaction):
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
 def generate_heatmap(daily_stats, start_date):
-    now = datetime.now()
+    now_date = datetime.now().date()
     weeks = []
     current_week = []
 
@@ -918,7 +931,7 @@ def generate_heatmap(daily_stats, start_date):
         current_week.append('⬜')
 
     current_date = start_date
-    while current_date <= now:
+    while current_date <= now_date:
         day_str = current_date.strftime('%Y-%m-%d')
         hours = daily_stats.get(day_str, 0)
 

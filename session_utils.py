@@ -43,7 +43,7 @@ def build_session_list_fields(rows: Iterable[Mapping[str, object]]) -> list[tupl
                 f'{format_time(float(session["duration_seconds"]) / 3600)}{state}'
             )
             if session['note']:
-                entry += f'\n> {session["note"]}'
+                entry += f'  • {session["note"]}'
             lines.append(entry)
 
         chunk: list[str] = []
