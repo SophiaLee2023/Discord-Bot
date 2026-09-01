@@ -1105,8 +1105,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
                    CASE
                        WHEN sessions.paused_at IS NOT NULL THEN 'Paused'
                        WHEN sessions.clock_in IS NOT NULL THEN 'In progress'
-                       WHEN sessions.clock_out IS NOT NULL THEN 'Completed'
-                       ELSE 'Recorded'
+                       ELSE NULL
                    END AS state
             FROM sessions
             JOIN activities ON sessions.activity_id = activities.id
@@ -1128,7 +1127,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             page_number = len(embeds) + 1
             embed = discord.Embed(
                 title=f'Sessions for {target.display_name}',
-                description='Each entry shows **ID** · activity — duration (state).',
+                description='Each entry shows **ID** · activity — duration. Active clocks include a state label.',
                 color=discord.Color.blurple(),
             )
             if len(fields) > 25:

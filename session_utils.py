@@ -35,11 +35,13 @@ def build_session_list_fields(rows: Iterable[Mapping[str, object]]) -> list[tupl
 
     fields = []
     for session_date, sessions in grouped.items():
-        lines = [
-            f'**#{session["id"]}** · {session["activity_name"]} — '
-            f'{format_time(float(session["duration_seconds"]) / 3600)} ({session["state"]})'
-            for session in sessions
-        ]
+        lines = []
+        for session in sessions:
+            state = f' ({session["state"]})' if session['state'] else ''
+            lines.append(
+                f'**#{session["id"]}** · {session["activity_name"]} — '
+                f'{format_time(float(session["duration_seconds"]) / 3600)}{state}'
+            )
 
         chunk: list[str] = []
         chunk_length = 0
