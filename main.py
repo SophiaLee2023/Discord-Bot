@@ -1160,7 +1160,7 @@ async def session_combine(interaction: discord.Interaction, ids: str):
         cursor = conn.cursor()
         placeholders = ', '.join('?' for _ in session_ids)
         cursor.execute(f'''
-            SELECT id, user_id, activity_id, date, duration_seconds, clock_in, paused_at
+            SELECT id, user_id, activity_id, date, duration_seconds, clock_in, clock_out, paused_at
             FROM sessions
             WHERE id IN ({placeholders})
         ''', session_ids)
@@ -1170,7 +1170,10 @@ async def session_combine(interaction: discord.Interaction, ids: str):
             conn.close()
             await interaction.response.send_message('One or more session IDs were not found.', ephemeral=True)
             return
-        if any(row['clock_in'] or row['paused_at'] for row in rows):
+        if any(
+            row['clock_out'] is None and (row['clock_in'] is not None or row['paused_at'] is not None)
+            for row in rows
+        ):
             conn.close()
             await interaction.response.send_message('Clock out active or paused sessions before combining them.', ephemeral=True)
             return
