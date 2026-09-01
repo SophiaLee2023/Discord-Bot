@@ -754,6 +754,8 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             stats_data = cursor.fetchall()
 
             if not stats_data:
+                if label == 'Today':
+                    continue
                 embed_stats.add_field(name=label, value='No time tracked', inline=True)
             else:
                 total_seconds = 0
@@ -762,7 +764,10 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
                     seconds = row['seconds'] or 0
                     total_seconds += seconds
                     stats_text += f"{row['name']}: {format_time(seconds / 3600)}\n"
-                stats_text += f"\n**Total: {format_time(total_seconds / 3600)}**"
+
+                if len(stats_data) > 1:
+                    stats_text += f"\n**Total: {format_time(total_seconds / 3600)}**"
+
                 embed_stats.add_field(name=label, value=stats_text, inline=True)
 
         embeds.append(embed_stats)
@@ -960,13 +965,14 @@ def generate_heatmap(daily_stats, start_date):
             return f"{start_dt.strftime('%b.') } {start_dt.day}-{end_dt.day}"
         return f"{start_dt.strftime('%b.')} {start_dt.day}-{end_dt.strftime('%b.')} {end_dt.day}"
 
+    max_label_width = max(len(week_label(start_dt, start_dt + timedelta(days=len(cells) - 1))) for start_dt, cells in weeks if any(cell != '⬜' for cell in cells))
     visible_weeks = []
     for start_dt, cells in weeks:
         if all(cell == '⬜' for cell in cells):
             continue
         end_dt = start_dt + timedelta(days=len(cells) - 1)
         label = week_label(start_dt, end_dt)
-        visible_weeks.append(f'{label:<14} {cells}')
+        visible_weeks.append(f'{label:<{max_label_width}}  {cells}')
 
     if not visible_weeks:
         return f'No tracked time in this period.\n⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
