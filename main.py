@@ -738,7 +738,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
                     WHERE sessions.user_id = ?
                     GROUP BY activities.name
                     ORDER BY seconds DESC
-                ''', (user.id, now.isoformat()))
+                ''', (now.isoformat(), user.id))
             else:
                 start_iso = start_date.isoformat()
                 cursor.execute(f'''
@@ -749,7 +749,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
                     WHERE sessions.user_id = ? AND sessions.date >= ?
                     GROUP BY activities.name
                     ORDER BY seconds DESC
-                ''', (user.id, start_iso, now.isoformat()))
+                ''', (now.isoformat(), user.id, start_iso))
 
             stats_data = cursor.fetchall()
 
@@ -776,7 +776,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             WHERE user_id = ? AND date >= ?
             GROUP BY sessions.date
             ORDER BY day
-        ''', (user.id, start_iso, now.isoformat()))
+        ''', (now.isoformat(), user.id, start_iso))
 
         daily_stats = {row['day']: (row['seconds'] or 0) / 3600 for row in cursor.fetchall()}
 
