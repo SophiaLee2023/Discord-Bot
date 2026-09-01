@@ -90,6 +90,7 @@ def init_db():
             clock_in TIMESTAMP,
             clock_out TIMESTAMP,
             paused_at TIMESTAMP,
+            note TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (activity_id) REFERENCES activities (id)
         )
@@ -198,6 +199,11 @@ def sync_db_schema(conn=None):
     if 'paused_at' not in sess_cols:
         try:
             cursor.execute('ALTER TABLE sessions ADD COLUMN paused_at TIMESTAMP')
+        except Exception:
+            pass
+    if 'note' not in sess_cols:
+        try:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN note TEXT')
         except Exception:
             pass
 
@@ -1102,6 +1108,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
                    sessions.date,
                    activities.name AS activity_name,
                    {session_duration_seconds_sql()} AS duration_seconds,
+                   sessions.note,
                    CASE
                        WHEN sessions.paused_at IS NOT NULL AND sessions.clock_out IS NULL THEN 'Paused'
                        WHEN sessions.clock_in IS NOT NULL AND sessions.clock_out IS NULL THEN 'In progress'
@@ -1127,7 +1134,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             page_number = len(embeds) + 1
             embed = discord.Embed(
                 title=f'Sessions for {target.display_name}',
-                description='Each entry shows **ID** · activity — duration. Active clocks include a state label.',
+                description='Each entry shows **ID** · activity — duration.',
                 color=discord.Color.blurple(),
             )
             if len(fields) > 25:
@@ -1143,6 +1150,57 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
                 await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+@session.command(name='tag', description='Add a note to your active or selected session')
+@app_commands.describe(note='Note to display with the session', id='Optional session ID; defaults to your active session')
+@app_commands.check(lambda i: check_channel(i))
+async def session_tag(interaction: discord.Interaction, note: str, id: int = None):
+    note = note.strip()
+    if not note:
+        await interaction.response.send_message('A session note cannot be empty.', ephemeral=True)
+        return
+    if len(note) > 500:
+        await interaction.response.send_message('Keep session notes to 500 characters or fewer.', ephemeral=True)
+        return
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        if id is None:
+            cursor.execute('''
+                SELECT id, user_id
+                FROM sessions
+                WHERE user_id = ? AND clock_out IS NULL
+                  AND (clock_in IS NOT NULL OR paused_at IS NOT NULL)
+            ''', (interaction.user.id,))
+            session_row = cursor.fetchone()
+            if not session_row:
+                conn.close()
+                await interaction.response.send_message(
+                    'You have no active session. Provide a session ID to tag a recorded session.', ephemeral=True
+                )
+                return
+        else:
+            cursor.execute('SELECT id, user_id FROM sessions WHERE id = ?', (id,))
+            session_row = cursor.fetchone()
+            if not session_row:
+                conn.close()
+                await interaction.response.send_message('Session ID not found.', ephemeral=True)
+                return
+            if session_row['user_id'] != interaction.user.id and not is_admin_app(interaction):
+                conn.close()
+                await interaction.response.send_message(
+                    'You can only tag your own sessions unless you are an admin.', ephemeral=True
+                )
+                return
+
+        cursor.execute('UPDATE sessions SET note = ? WHERE id = ?', (note, session_row['id']))
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(f'Added a note to session #{session_row["id"]}.', ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error tagging session: {e}', ephemeral=True)
 
 
 @session.command(name='combine', description='Combine sessions with matching activity and date')
