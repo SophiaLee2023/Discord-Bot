@@ -48,6 +48,8 @@ All commands are slash commands and will appear in Discord's command preview whe
 ### Time Tracking
 - `/clockin <activity_name> [user]` - Clock in to an activity (admins can optionally specify another user)
 - `/clockout [user]` - Clock out of current activity (admins can optionally specify another user)
+- `/pause` - Pause your current clock without recording paused time
+- `/resume` - Resume your paused clock
 - `/status` - View current status and elapsed time
 
 ### Statistics
@@ -65,9 +67,10 @@ All commands are slash commands and will appear in Discord's command preview whe
 - `/channel list` - View all allowed channels (if none set, bot works everywhere)
 
 ### Sessions
-- `/session add <H:M:S> [YYYY-MM-DD] [activity] [user]` - Add a session with duration (H:M:S) for a given date (defaults to today). Admins may add for other users.
+- `/session add <duration> [date] [activity] [user]` - Add a session. Durations accept minutes, `M:S`, or `H:M:S`; dates accept `YYYY-MM-DD`, `MM-DD`, or `MM-DD-YYYY` (defaults to today). Admins may add for other users.
+- `/session combine <ids>` - Combine sessions with the same user, activity, and date. Provide comma-separated IDs such as `11, 12, 13`; the earliest ID is kept.
 - `/session remove <id> [user]` - Remove a session by its numeric session id. Only the session owner or an admin may remove others' sessions.
-- `/session edit <id> [date] [H:M:S]` - Edit a session's date and/or duration. Use `YYYY-MM-DD` for date and `H:M:S` for duration. Only the session owner or an admin may edit other users' sessions.
+- `/session edit <id> [date] [duration]` - Edit a session's date and/or duration using the same date and duration formats. Only the session owner or an admin may edit other users' sessions.
 - `/session list [user]` - List sessions grouped by date (defaults to yourself). Each session line includes its numeric id for use with `/session remove` and `/session edit`. This list is visible only to the requesting user.
 
 ### Quotes

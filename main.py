@@ -1,12 +1,13 @@
 import os
 import glob
 import sqlite3
-from helpers import parse_hms_to_seconds, format_time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord import app_commands
+from session_utils import build_session_list_fields, parse_session_ids, session_duration_seconds_sql
+from time_utils import format_time, parse_date_input, parse_hms_to_seconds
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -34,14 +35,6 @@ def find_db_path(preferred='time_tracker.db'):
 
 DB_PATH = find_db_path()
 
-
-def session_duration_seconds_sql(alias: str = 'sessions') -> str:
-    """Return SQL for a duration, calculating only an open clocked-in session."""
-    return f'''CASE
-        WHEN {alias}.clock_in IS NOT NULL AND {alias}.clock_out IS NULL
-            THEN MAX(0, CAST((JULIANDAY(?) - JULIANDAY({alias}.clock_in)) * 86400 AS INTEGER))
-        ELSE {alias}.duration_seconds
-    END'''
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -96,6 +89,7 @@ def init_db():
             duration_seconds INTEGER NOT NULL,
             clock_in TIMESTAMP,
             clock_out TIMESTAMP,
+            paused_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (activity_id) REFERENCES activities (id)
         )
@@ -199,6 +193,11 @@ def sync_db_schema(conn=None):
     if 'clock_out' not in sess_cols:
         try:
             cursor.execute('ALTER TABLE sessions ADD COLUMN clock_out TIMESTAMP')
+        except Exception:
+            pass
+    if 'paused_at' not in sess_cols:
+        try:
+            cursor.execute('ALTER TABLE sessions ADD COLUMN paused_at TIMESTAMP')
         except Exception:
             pass
 
@@ -559,7 +558,9 @@ async def clockin(interaction: discord.Interaction, activity_name: str = None, u
 
         cursor.execute('''
             SELECT id FROM sessions
-            WHERE user_id = ? AND clock_out IS NULL
+            WHERE user_id = ?
+              AND clock_out IS NULL
+              AND (clock_in IS NOT NULL OR paused_at IS NOT NULL)
         ''', (target_user.id,))
         active = cursor.fetchone()
 
@@ -587,8 +588,8 @@ async def clockin(interaction: discord.Interaction, activity_name: str = None, u
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name='clockout', description='Clock out of current activity (optional +H:M:S or -H:M:S to adjust)')
-@app_commands.describe(time='Optional time offset to add/subtract in H:M:S (e.g. 0:30:00 or +0:05:00 or -0:02:00)', user='Optional: mention a member to clock out (admin only)')
+@bot.tree.command(name='clockout', description='Clock out of current activity (optional signed duration adjustment)')
+@app_commands.describe(time='Optional offset: minutes, M:S, or H:M:S (for example +5 or -0:02:00)', user='Optional: mention a member to clock out (admin only)')
 @app_commands.check(lambda i: check_channel(i))
 async def clockout(interaction: discord.Interaction, time: str = None, user: discord.User = None):
     try:
@@ -602,10 +603,10 @@ async def clockout(interaction: discord.Interaction, time: str = None, user: dis
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT sessions.id, activities.name, sessions.clock_in
+            SELECT sessions.id, activities.name, sessions.clock_in, sessions.duration_seconds
             FROM sessions
             JOIN activities ON sessions.activity_id = activities.id
-            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL
+            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL AND sessions.clock_in IS NOT NULL
         ''', (target_user.id,))
         active = cursor.fetchone()
 
@@ -614,7 +615,7 @@ async def clockout(interaction: discord.Interaction, time: str = None, user: dis
             try:
                 delta_seconds = parse_hms_to_seconds(time)
             except ValueError:
-                embed = discord.Embed(description='Invalid time format! Use H:M:S', color=discord.Color.red())
+                embed = discord.Embed(description='Invalid time. Use minutes, M:S, or H:M:S', color=discord.Color.red())
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 conn.close()
                 return
@@ -622,8 +623,8 @@ async def clockout(interaction: discord.Interaction, time: str = None, user: dis
         if active:
             # active session -> set clock_out to now +/- delta
             clock_out_time = datetime.now() + timedelta(seconds=delta_seconds)
-            duration = clock_out_time - datetime.fromisoformat(active['clock_in'])
-            seconds = int(round(duration.total_seconds()))
+            elapsed_seconds = int(round((clock_out_time - datetime.fromisoformat(active['clock_in'])).total_seconds()))
+            seconds = active['duration_seconds'] + elapsed_seconds
             if seconds < 0:
                 await interaction.response.send_message(
                     'The adjustment cannot make a session end before it started.', ephemeral=True
@@ -636,8 +637,7 @@ async def clockout(interaction: discord.Interaction, time: str = None, user: dis
                 WHERE id = ?
             ''', (clock_out_time.isoformat(), seconds, active['id']))
             conn.commit()
-            hours = duration.total_seconds() / 3600
-            time_str = format_time(hours)
+            time_str = format_time(seconds / 3600)
 
             cursor.execute(f'''
                 SELECT SUM({session_duration_seconds_sql()}) AS total_seconds
@@ -809,10 +809,12 @@ async def status(interaction: discord.Interaction):
         cursor = conn.cursor()
 
         cursor.execute('''
-            SELECT activities.name, sessions.clock_in
+            SELECT activities.name, sessions.clock_in, sessions.duration_seconds, sessions.paused_at
             FROM sessions
             JOIN activities ON sessions.activity_id = activities.id
-            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL
+            WHERE sessions.user_id = ?
+              AND sessions.clock_out IS NULL
+              AND (sessions.clock_in IS NOT NULL OR sessions.paused_at IS NOT NULL)
         ''', (interaction.user.id,))
 
         active = cursor.fetchone()
@@ -822,16 +824,83 @@ async def status(interaction: discord.Interaction):
             await interaction.response.send_message(f'You are currently **not clocked in**', ephemeral=True)
             return
 
-        clock_in = datetime.fromisoformat(active['clock_in'])
-        duration = datetime.now() - clock_in
-        hours = duration.total_seconds() / 3600
+        seconds = active['duration_seconds']
+        if active['clock_in']:
+            seconds += int(round((datetime.now() - datetime.fromisoformat(active['clock_in'])).total_seconds()))
 
         embed = discord.Embed(title='Current Status', color=discord.Color.yellow())
         embed.add_field(name='Activity', value=active['name'], inline=False)
-        embed.add_field(name='Duration', value=format_time(hours), inline=False)
+        embed.add_field(name='State', value='Paused' if active['paused_at'] else 'Clocked in', inline=False)
+        embed.add_field(name='Duration', value=format_time(seconds / 3600), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f'Error: {str(e)}')
+
+
+@bot.tree.command(name='pause', description='Pause your current clock')
+@app_commands.check(lambda i: check_channel(i))
+async def pause(interaction: discord.Interaction):
+    now = datetime.now()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT sessions.id, sessions.clock_in, sessions.duration_seconds, sessions.paused_at, activities.name
+            FROM sessions
+            JOIN activities ON sessions.activity_id = activities.id
+            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL
+              AND (sessions.clock_in IS NOT NULL OR sessions.paused_at IS NOT NULL)
+        ''', (interaction.user.id,))
+        active = cursor.fetchone()
+        if not active:
+            conn.close()
+            await interaction.response.send_message('You are not clocked in.', ephemeral=True)
+            return
+        if active['paused_at']:
+            conn.close()
+            await interaction.response.send_message('Your clock is already paused.', ephemeral=True)
+            return
+
+        seconds = active['duration_seconds'] + int(round((now - datetime.fromisoformat(active['clock_in'])).total_seconds()))
+        cursor.execute('''
+            UPDATE sessions
+            SET duration_seconds = ?, clock_in = NULL, paused_at = ?
+            WHERE id = ?
+        ''', (seconds, now.isoformat(), active['id']))
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(
+            f'Paused **{active["name"]}** at {format_time(seconds / 3600)}.', ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+@bot.tree.command(name='resume', description='Resume your paused clock')
+@app_commands.check(lambda i: check_channel(i))
+async def resume(interaction: discord.Interaction):
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT sessions.id, activities.name
+            FROM sessions
+            JOIN activities ON sessions.activity_id = activities.id
+            WHERE sessions.user_id = ? AND sessions.clock_out IS NULL AND sessions.paused_at IS NOT NULL
+        ''', (interaction.user.id,))
+        paused = cursor.fetchone()
+        if not paused:
+            conn.close()
+            await interaction.response.send_message('You do not have a paused clock.', ephemeral=True)
+            return
+
+        cursor.execute('UPDATE sessions SET clock_in = ?, paused_at = NULL WHERE id = ?',
+                       (datetime.now().isoformat(), paused['id']))
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(f'Resumed **{paused["name"]}**.', ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
 def generate_heatmap(daily_stats, start_date):
     now = datetime.now()
@@ -1027,13 +1096,23 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
         target = user if user else interaction.user
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT sessions.id, sessions.date, sessions.duration_seconds, activities.name as activity_name
+        now = datetime.now().isoformat()
+        cursor.execute(f'''
+            SELECT sessions.id,
+                   sessions.date,
+                   activities.name AS activity_name,
+                   {session_duration_seconds_sql()} AS duration_seconds,
+                   CASE
+                       WHEN sessions.paused_at IS NOT NULL THEN 'Paused'
+                       WHEN sessions.clock_in IS NOT NULL THEN 'In progress'
+                       WHEN sessions.clock_out IS NOT NULL THEN 'Completed'
+                       ELSE 'Recorded'
+                   END AS state
             FROM sessions
             JOIN activities ON sessions.activity_id = activities.id
             WHERE sessions.user_id = ?
-            ORDER BY date ASC, sessions.id ASC
-        ''', (target.id,))
+            ORDER BY sessions.date DESC, sessions.id DESC
+        ''', (now, target.id))
         rows = cursor.fetchall()
         conn.close()
 
@@ -1041,26 +1120,93 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             await interaction.response.send_message(f'No sessions found for {target.mention}', ephemeral=True)
             return
 
-        grouped = {}
-        for r in rows:
-            grouped.setdefault(r['date'], []).append(r)
+        fields = build_session_list_fields(rows)
 
-        lines = []
-        for date, items in grouped.items():
-            lines.append(f'**{date}**')
-            for it in items:
-                dur = it['duration_seconds']
-                dur_str = format_time(dur / 3600)
-                lines.append(f'#{it["id"]} {it["activity_name"]} — {dur_str}')
+        embeds = []
+        for start in range(0, len(fields), 25):
+            page_fields = fields[start:start + 25]
+            page_number = len(embeds) + 1
+            embed = discord.Embed(
+                title=f'Sessions for {target.display_name}',
+                description='Each entry shows **ID** · activity — duration (state).',
+                color=discord.Color.blurple(),
+            )
+            if len(fields) > 25:
+                embed.set_footer(text=f'Page {page_number} of {(len(fields) + 24) // 25}')
+            for date, value in page_fields:
+                embed.add_field(name=f'📅 {date}', value=value, inline=False)
+            embeds.append(embed)
 
-        embed = discord.Embed(title=f'Sessions for {target.display_name}', description='\n'.join(lines[:200]), color=discord.Color.blurple())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        for index, embed in enumerate(embeds):
+            if index == 0:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
 
-@session.command(name='add', description='Add a session for a date (duration H:M:S)')
-@app_commands.describe(duration='Duration in H:M:S', date_str='Date (YYYY-MM-DD). Defaults to today', activity_name='Optional activity name', user='Optional: add for another user (admin only)')
+@session.command(name='combine', description='Combine sessions with matching activity and date')
+@app_commands.describe(ids='Comma-separated session IDs, for example: 11, 12, 13')
+@app_commands.check(lambda i: check_channel(i))
+async def session_combine(interaction: discord.Interaction, ids: str):
+    try:
+        session_ids = parse_session_ids(ids)
+    except ValueError as error:
+        await interaction.response.send_message(str(error), ephemeral=True)
+        return
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        placeholders = ', '.join('?' for _ in session_ids)
+        cursor.execute(f'''
+            SELECT id, user_id, activity_id, date, duration_seconds, clock_in, paused_at
+            FROM sessions
+            WHERE id IN ({placeholders})
+        ''', session_ids)
+        rows = cursor.fetchall()
+
+        if len(rows) != len(session_ids):
+            conn.close()
+            await interaction.response.send_message('One or more session IDs were not found.', ephemeral=True)
+            return
+        if any(row['clock_in'] or row['paused_at'] for row in rows):
+            conn.close()
+            await interaction.response.send_message('Clock out active or paused sessions before combining them.', ephemeral=True)
+            return
+
+        owners = {row['user_id'] for row in rows}
+        activities = {row['activity_id'] for row in rows}
+        dates = {row['date'] for row in rows}
+        if len(owners) != 1 or len(activities) != 1 or len(dates) != 1:
+            conn.close()
+            await interaction.response.send_message(
+                'Sessions must belong to one user and have the same activity and date.', ephemeral=True
+            )
+            return
+        if interaction.user.id not in owners and not is_admin_app(interaction):
+            conn.close()
+            await interaction.response.send_message('You can only combine your own sessions unless you are an admin.', ephemeral=True)
+            return
+
+        anchor_id = min(session_ids)
+        total_seconds = sum(row['duration_seconds'] for row in rows)
+        other_ids = [id_ for id_ in session_ids if id_ != anchor_id]
+        cursor.execute('UPDATE sessions SET duration_seconds = ? WHERE id = ?', (total_seconds, anchor_id))
+        other_placeholders = ', '.join('?' for _ in other_ids)
+        cursor.execute(f'DELETE FROM sessions WHERE id IN ({other_placeholders})', other_ids)
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(
+            f'Combined {len(session_ids)} sessions into #{anchor_id} ({format_time(total_seconds / 3600)}).', ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(f'Error combining sessions: {e}', ephemeral=True)
+
+
+@session.command(name='add', description='Add a session for a date')
+@app_commands.describe(duration='Duration: minutes, M:S, or H:M:S', date_str='Date: YYYY-MM-DD, MM-DD, or MM-DD-YYYY. Defaults to today', activity_name='Optional activity name', user='Optional: add for another user (admin only)')
 @app_commands.check(lambda i: check_channel(i))
 async def session_add(interaction: discord.Interaction, duration: str, date_str: str = None, activity_name: str = None, user: discord.User = None):
     target_user = user if user else interaction.user
@@ -1071,7 +1217,7 @@ async def session_add(interaction: discord.Interaction, duration: str, date_str:
     try:
         seconds = parse_hms_to_seconds(duration)
     except Exception:
-        await interaction.response.send_message('Invalid duration format. Use H:M:S', ephemeral=True)
+        await interaction.response.send_message('Invalid duration. Use minutes, M:S, or H:M:S', ephemeral=True)
         return
     if seconds < 0:
         await interaction.response.send_message('Session duration cannot be negative.', ephemeral=True)
@@ -1079,13 +1225,10 @@ async def session_add(interaction: discord.Interaction, duration: str, date_str:
 
     if date_str:
         try:
-            date_obj = datetime.fromisoformat(date_str).date()
-        except Exception:
-            try:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-            except Exception:
-                await interaction.response.send_message('Invalid date format. Use YYYY-MM-DD', ephemeral=True)
-                return
+            date_obj = parse_date_input(date_str)
+        except ValueError:
+            await interaction.response.send_message('Invalid date. Use YYYY-MM-DD, MM-DD, or MM-DD-YYYY', ephemeral=True)
+            return
     else:
         date_obj = datetime.now().date()
 
@@ -1155,7 +1298,7 @@ async def session_remove(interaction: discord.Interaction, id: int, user: discor
 
 
 @session.command(name='edit', description='Edit a session by id (change date and/or duration)')
-@app_commands.describe(id='Session id to edit', date='Optional new date (YYYY-MM-DD)', duration='Optional new duration (H:M:S)')
+@app_commands.describe(id='Session id to edit', date='Optional new date: YYYY-MM-DD, MM-DD, or MM-DD-YYYY', duration='Optional duration: minutes, M:S, or H:M:S')
 @app_commands.check(lambda i: check_channel(i))
 async def session_edit(interaction: discord.Interaction, id: int, date: str = None, duration: str = None):
     try:
@@ -1179,14 +1322,11 @@ async def session_edit(interaction: discord.Interaction, id: int, date: str = No
 
         if date:
             try:
-                date_obj = datetime.fromisoformat(date).date()
-            except Exception:
-                try:
-                    date_obj = datetime.strptime(date, '%Y-%m-%d').date()
-                except Exception:
-                    conn.close()
-                    await interaction.response.send_message('Invalid date format. Use YYYY-MM-DD', ephemeral=True)
-                    return
+                date_obj = parse_date_input(date)
+            except ValueError:
+                conn.close()
+                await interaction.response.send_message('Invalid date. Use YYYY-MM-DD, MM-DD, or MM-DD-YYYY', ephemeral=True)
+                return
             updates.append('date = ?')
             params.append(date_obj.isoformat())
 
@@ -1195,7 +1335,7 @@ async def session_edit(interaction: discord.Interaction, id: int, date: str = No
                 seconds = parse_hms_to_seconds(duration)
             except Exception:
                 conn.close()
-                await interaction.response.send_message('Invalid duration format. Use H:M:S', ephemeral=True)
+                await interaction.response.send_message('Invalid duration. Use minutes, M:S, or H:M:S', ephemeral=True)
                 return
             if seconds < 0:
                 conn.close()
@@ -1371,6 +1511,8 @@ async def commands_help(interaction: discord.Interaction):
         ('Time Tracking', [
             ('/clockin <activity> [user]', 'Clock in to an activity'),
             ('/clockout [user]', 'Clock out of current activity'),
+            ('/pause', 'Pause your current clock'),
+            ('/resume', 'Resume your paused clock'),
             ('/status', 'View your current status'),
         ]),
         ('Statistics', [
@@ -1388,9 +1530,10 @@ async def commands_help(interaction: discord.Interaction):
             ('/channel list', 'List allowed channels'),
         ]),
         ('Sessions', [
-            ('/session add <H:M:S> [YYYY-MM-DD] [activity] [user]', 'Add a session (duration H:M:S) for a date'),
+            ('/session add <duration> [date] [activity] [user]', 'Add a session using minutes, M:S, or H:M:S'),
+            ('/session combine <ids>', 'Combine matching sessions, e.g. `11, 12, 13`'),
             ('/session remove <id> [user]', 'Remove a session by numeric id'),
-            ('/session edit <id> [date] [H:M:S]', 'Edit a session by id (change date and/or duration)'),
+            ('/session edit <id> [date] [duration]', 'Edit a session by id (change date and/or duration)'),
             ('/session list [user]', 'List sessions (defaults to yourself)'),
         ]),
     ]
