@@ -495,38 +495,6 @@ async def activity_icon(interaction: discord.Interaction, name: str, image: disc
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@activity.command(name='default', description='Set default activity for this server (optional name: unset)')
-@app_commands.describe(name='Name of the activity to set as default (omit to unset)')
-@app_commands.check(lambda i: check_channel(i))
-async def activity_default(interaction: discord.Interaction, name: str = None):
-    if not is_admin_app(interaction):
-        await interaction.response.send_message('You need to be an admin to use this command!', ephemeral=True)
-        return
-
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        if name:
-            cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
-            row = cursor.fetchone()
-            if not row:
-                conn.close()
-                embed = discord.Embed(description=f'Activity **{name}** not found!', color=discord.Color.red())
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-                return
-            set_default_activity_for_guild(interaction.guild.id, row['id'])
-            embed = discord.Embed(description=f'Default activity set to **{name}**', color=discord.Color.green())
-        else:
-            # unset
-            cursor.execute('DELETE FROM guild_settings WHERE guild_id = ?', (interaction.guild.id,))
-            conn.commit()
-            embed = discord.Embed(description='Default activity unset', color=discord.Color.green())
-        conn.close()
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
 @bot.tree.command(name='clockin', description='Clock in to an activity')
 @app_commands.describe(activity_name='Optional: name of the activity', user='Optional: mention a member to clock in (admin only)')
 @app_commands.check(lambda i: check_channel(i))
@@ -727,7 +695,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             ('all', None, 'All-Time'),
         ]
 
-        embed_stats = discord.Embed(title=f"{user.mention}'s Time Tracking", color=discord.Color.blurple())
+        embed_stats = discord.Embed(title=f"@{user.name}'s Time Tracking", color=discord.Color.blurple())
 
         for _, start_date, label in periods:
             if start_date is None:
@@ -1060,7 +1028,7 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
             hours = (row['seconds'] or 0) / 3600
             try:
                 user = await bot.fetch_user(user_id)
-                username = user.mention
+                username = f"@{user.name}"
             except:
                 username = f'User {user_id}'
 
@@ -1185,7 +1153,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             page_fields = fields[start:start + 25]
             page_number = len(embeds) + 1
             embed = discord.Embed(
-                title=f'Sessions for {target.mention}',
+                title=f'Sessions for @{target.name}',
                 description='Each entry shows **ID** · activity — duration.',
                 color=discord.Color.blurple(),
             )
@@ -1591,7 +1559,7 @@ async def activity_whatif(interaction: discord.Interaction, activity_name: str, 
             earnings = hours * wage
             try:
                 user = await bot.fetch_user(uid)
-                uname = user.mention
+                uname = f"@{user.name}"
             except:
                 uname = f'User {uid}'
             lines.append(f'{uname}: {format_time(hours)} → ${earnings:,.2f}')
@@ -1615,6 +1583,7 @@ async def commands_help(interaction: discord.Interaction):
             ('/activity remove <name>', 'Remove an activity (admin only)'),
             ('/activity list', 'List all activities'),
             ('/activity icon <name> <image>', 'Set an icon for an activity (admin only)'),
+            ('/activity whatif <name> <wage>', 'Estimate earnings for an activity'),
         ]),
         ('Time Tracking', [
             ('/clockin <activity> [user]', 'Clock in to an activity'),
