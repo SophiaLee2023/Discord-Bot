@@ -369,6 +369,7 @@ async def on_ready():
         print(f'Failed to sync commands: {type(e).__name__}: {e}')
         import traceback
         traceback.print_exc()
+    await bot.change_presence(activity=discord.Game(name='/gnaij'))
     print('Bot is ready.')
 
 def check_channel(interaction: discord.Interaction) -> bool:
@@ -589,7 +590,7 @@ async def clockin(interaction: discord.Interaction, activity_name: str = None, u
         embed = discord.Embed(description=f'{target_user.mention} clocked in to **{activity["name"]}**', color=discord.Color.green())
         if icon_url:
             embed.set_image(url=icon_url)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
     except Exception as e:
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
