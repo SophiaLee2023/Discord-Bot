@@ -2,6 +2,7 @@ import os
 import glob
 import sqlite3
 from datetime import datetime, timedelta
+from typing import List
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
@@ -386,6 +387,19 @@ def check_channel(interaction: discord.Interaction) -> bool:
         return False
     return True
 
+async def activity_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT name FROM activities ORDER BY name')
+    activities = [row['name'] for row in cursor.fetchall()]
+    conn.close()
+
+    filtered = [a for a in activities if current.lower() in a.lower()]
+    return [app_commands.Choice(name=a, value=a) for a in filtered][:25]
+
 activity = app_commands.Group(name='activity', description='Manage activities')
 
 @activity.command(name='add', description='Add a new activity/commitment to track')
@@ -411,6 +425,7 @@ async def activity_add(interaction: discord.Interaction, name: str):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @activity.command(name='remove', description='Remove an activity')
+@app_commands.autocomplete(name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
 async def activity_remove(interaction: discord.Interaction, name: str):
     if not is_admin_app(interaction):
@@ -461,6 +476,7 @@ async def activity_list(interaction: discord.Interaction):
 
 @activity.command(name='icon', description='Set an icon image for an activity')
 @app_commands.describe(name='Name of the activity', image='Image to use as icon')
+@app_commands.autocomplete(name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
 async def activity_icon(interaction: discord.Interaction, name: str, image: discord.Attachment):
     if not is_admin_app(interaction):
@@ -497,6 +513,7 @@ async def activity_icon(interaction: discord.Interaction, name: str, image: disc
 
 @bot.tree.command(name='clockin', description='Clock in to an activity')
 @app_commands.describe(activity_name='Optional: name of the activity', user='Optional: mention a member to clock in (admin only)')
+@app_commands.autocomplete(activity_name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
 async def clockin(interaction: discord.Interaction, activity_name: str = None, user: discord.User = None):
     try:
@@ -695,7 +712,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             ('all', None, 'All-Time'),
         ]
 
-        embed_stats = discord.Embed(title=f"@{user.name}'s Time Tracking", color=discord.Color.blurple())
+        embed_stats = discord.Embed(title=f"{user.mention}'s Time Tracking", color=discord.Color.blurple())
 
         for _, start_date, label in periods:
             if start_date is None:
@@ -989,6 +1006,7 @@ def calculate_streak(daily_stats):
 
 
 @bot.tree.command(name='leaderboard', description='View leaderboard for an activity')
+@app_commands.autocomplete(activity_name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
 async def leaderboard(interaction: discord.Interaction, activity_name: str):
     try:
@@ -1028,13 +1046,13 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
             hours = (row['seconds'] or 0) / 3600
             try:
                 user = await bot.fetch_user(user_id)
-                username = f"@{user.name}"
+                username = user.mention
             except:
                 username = f'User {user_id}'
 
             medal = medals[idx] if idx < 3 else f'{idx + 1}.'
             time_str = format_time(hours)
-            embed.add_field(name=f'{medal} {username}', value=time_str, inline=False)
+            embed.add_field(name=f'{medal}', value=f'{username}\n{time_str}', inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
@@ -1153,7 +1171,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             page_fields = fields[start:start + 25]
             page_number = len(embeds) + 1
             embed = discord.Embed(
-                title=f'Sessions for @{target.name}',
+                title=f'Sessions for {target.mention}',
                 description='Each entry shows **ID** · activity — duration.',
                 color=discord.Color.blurple(),
             )
@@ -1283,6 +1301,7 @@ async def session_combine(interaction: discord.Interaction, ids: str):
 
 @session.command(name='add', description='Add a session for a date')
 @app_commands.describe(duration='Duration: minutes, M:S, or H:M:S', date_str='Date: YYYY-MM-DD, MM-DD, or MM-DD-YYYY. Defaults to today', activity_name='Optional activity name', user='Optional: add for another user (admin only)')
+@app_commands.autocomplete(activity_name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
 async def session_add(interaction: discord.Interaction, duration: str, date_str: str = None, activity_name: str = None, user: discord.User = None):
     target_user = user if user else interaction.user
@@ -1524,6 +1543,7 @@ async def say(interaction: discord.Interaction, message: str):
 
 @activity.command(name='whatif', description='Estimate earnings for an activity at given hourly wage')
 @app_commands.describe(activity_name='Activity name to evaluate', wage='Hourly wage (e.g. 10.5)')
+@app_commands.autocomplete(activity_name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
 async def activity_whatif(interaction: discord.Interaction, activity_name: str, wage: float):
     try:
@@ -1559,7 +1579,7 @@ async def activity_whatif(interaction: discord.Interaction, activity_name: str, 
             earnings = hours * wage
             try:
                 user = await bot.fetch_user(uid)
-                uname = f"@{user.name}"
+                uname = user.mention
             except:
                 uname = f'User {uid}'
             lines.append(f'{uname}: {format_time(hours)} → ${earnings:,.2f}')
