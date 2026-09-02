@@ -727,7 +727,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             ('all', None, 'All-Time'),
         ]
 
-        embed_stats = discord.Embed(title=f"{user.name}'s Time Tracking", color=discord.Color.blurple())
+        embed_stats = discord.Embed(title=f"{user.mention}'s Time Tracking", color=discord.Color.blurple())
 
         for _, start_date, label in periods:
             if start_date is None:
@@ -832,7 +832,7 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             embed_metrics.add_field(name='Daily Avg', value=format_time(avg_per_day), inline=True)
             embed_metrics.add_field(name='Most Active', value=most_active_day, inline=True)
             if favorite_activity:
-                embed_metrics.add_field(name='Favorite Activity', value=f"{favorite_activity['name']} ({format_time((favorite_activity['seconds'] or 0) / 3600)})", inline=True)
+                embed_metrics.add_field(name='Favorite Activity', value=f"**{favorite_activity['name']}** ({format_time((favorite_activity['seconds'] or 0) / 3600)})", inline=True)
             embeds.append(embed_metrics)
 
         conn.close()
@@ -1060,7 +1060,7 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
             hours = (row['seconds'] or 0) / 3600
             try:
                 user = await bot.fetch_user(user_id)
-                username = user.name
+                username = user.mention
             except:
                 username = f'User {user_id}'
 
@@ -1185,7 +1185,7 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
             page_fields = fields[start:start + 25]
             page_number = len(embeds) + 1
             embed = discord.Embed(
-                title=f'Sessions for {target.display_name}',
+                title=f'Sessions for {target.mention}',
                 description='Each entry shows **ID** · activity — duration.',
                 color=discord.Color.blurple(),
             )
@@ -1591,7 +1591,7 @@ async def activity_whatif(interaction: discord.Interaction, activity_name: str, 
             earnings = hours * wage
             try:
                 user = await bot.fetch_user(uid)
-                uname = user.name
+                uname = user.mention
             except:
                 uname = f'User {uid}'
             lines.append(f'{uname}: {format_time(hours)} → ${earnings:,.2f}')
