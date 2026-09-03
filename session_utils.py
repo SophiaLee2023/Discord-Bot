@@ -7,10 +7,11 @@ from time_utils import format_time
 
 def session_duration_seconds_sql(alias: str = 'sessions') -> str:
     """Return SQL that includes the elapsed time of a running session."""
+    # Use REPLACE to convert ISO 'T' separator into a space so SQLite's JULIANDAY can parse it.
     return f'''CASE
         WHEN {alias}.clock_in IS NOT NULL AND {alias}.clock_out IS NULL
             THEN {alias}.duration_seconds
-                 + MAX(0, CAST((JULIANDAY(?) - JULIANDAY({alias}.clock_in)) * 86400 AS INTEGER))
+                 + MAX(0, CAST((JULIANDAY(REPLACE(?,'T',' ')) - JULIANDAY(REPLACE({alias}.clock_in,'T',' '))) * 86400 AS INTEGER))
         ELSE {alias}.duration_seconds
     END'''
 

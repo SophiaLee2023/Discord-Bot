@@ -40,17 +40,19 @@ A Discord bot for tracking time spent on activities/commitments with per-user st
 All commands are slash commands and will appear in Discord's command preview when you type `/`.
 
 ### Activity Management
-- `/activity add <name>` - Add a new activity (admin only)
-- `/activity remove <name>` - Remove an activity (admin only)
-- `/activity list` - List all activities
-- `/activity icon <name> <image>` - Set an icon for an activity (admin only)
+   - `/activity add <name>` - Add a new activity (admin only)
+   - `/activity remove <name>` - Remove an activity (admin only)
+   - `/activity list` - List all activities
+   - `/activity icon <name> <image>` - Set an icon for an activity (admin only)
+   - `/activity if <name> <wage>` - Estimate earnings for an activity
 
 ### Time Tracking
 - `/clockin <activity_name> [user]` - Clock in to an activity (admins can optionally specify another user)
 - `/clockout [user]` - Clock out of current activity (admins can optionally specify another user)
-- `/pause` - Pause your current clock without recording paused time
-- `/resume` - Resume your paused clock
-- `/status` - View current status and elapsed time
+ - `/pause` - Pause your current clock
+ - `/resume` - Resume your paused clock
+ - `/status` - View current status and elapsed time
+ - `/cancel [user]` - Cancel and delete your active clock-in session (admin may specify another user)
 
 ### Statistics
 - `/stats [user]` - View your stats (today, this week, all-time) with heatmap and metrics
@@ -72,6 +74,8 @@ All commands are slash commands and will appear in Discord's command preview whe
 - `/session remove <id> [user]` - Remove a session by its numeric session id. Only the session owner or an admin may remove others' sessions.
 - `/session edit <id> [date] [duration]` - Edit a session's date and/or duration using the same date and duration formats. Only the session owner or an admin may edit other users' sessions.
 - `/session list [user]` - List sessions grouped by date (defaults to yourself). Each session line includes its numeric id for use with `/session remove` and `/session edit`. This list is visible only to the requesting user.
+
+Note: The bot exposes top-level shortcuts `/pause`, `/resume`, and `/cancel` as the primary commands for pausing, resuming, and cancelling active sessions.
 
 ### Quotes
 - `/quote add <string>` - Add a new quote (visible only to the adding user).

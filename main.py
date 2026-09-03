@@ -1,10 +1,13 @@
 import os
 import glob
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as _date
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import List
+from typing import Optional
 from dotenv import load_dotenv
 import discord
+import re
 from discord.ext import commands
 from discord import app_commands
 from session_utils import build_session_list_fields, parse_session_ids, session_duration_seconds_sql
@@ -17,6 +20,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
+
+# Ensure mentions in bot responses render as clickable where appropriate
+try:
+    bot.allowed_mentions = discord.AllowedMentions(users=True, roles=False, everyone=False)
+except Exception:
+    # older discord.py versions may not accept direct assignment; ignore if unavailable
+    pass
 
 
 def find_db_path(preferred='time_tracker.db'):
@@ -208,6 +218,22 @@ def sync_db_schema(conn=None):
         except Exception:
             pass
 
+    # Ensure user_settings table exists (store per-user timezone preferences)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT
+        )
+    ''')
+    # ensure confirmed column exists for user_settings
+    cursor.execute("PRAGMA table_info(user_settings)")
+    us_cols = [r[1] for r in cursor.fetchall()]
+    if 'confirmed' not in us_cols:
+        try:
+            cursor.execute('ALTER TABLE user_settings ADD COLUMN confirmed INTEGER DEFAULT 0')
+        except Exception:
+            pass
+
     conn.commit()
     if close_conn:
         conn.close()
@@ -310,6 +336,70 @@ def set_default_activity_for_guild(guild_id: int, activity_id: int):
     conn.close()
 
 
+def get_user_timezone(user_id: int) -> str | None:
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT timezone FROM user_settings WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row['timezone'] if row else None
+
+
+def set_user_timezone(user_id: int, tz: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO user_settings (user_id, timezone, confirmed) VALUES (?, ?, 1)'
+                   ' ON CONFLICT(user_id) DO UPDATE SET timezone=excluded.timezone, confirmed=1', (user_id, tz))
+    conn.commit()
+    conn.close()
+
+
+def get_user_timezone_and_confirmed(user_id: int) -> tuple[str | None, bool]:
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT timezone, confirmed FROM user_settings WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None, False
+    return row['timezone'], bool(row['confirmed'])
+
+
+async def resolve_user_display(user_id: int, guild: discord.Guild | None = None) -> str:
+    """Return a mention string for a user id suitable for embeds and messages.
+    Prefer guild member mention, then fetched user mention, else fallback to numeric mention.
+    """
+    try:
+        if guild:
+            member = guild.get_member(user_id)
+            if member:
+                return member.mention
+        user = await bot.fetch_user(user_id)
+        # If the user isn't a member of this guild, return a readable name instead of a raw numeric mention
+        return f'{user.name}#{user.discriminator}'
+    except Exception:
+        # Last-resort fallback: show numeric id without angle brackets to avoid raw unresolved mention display
+        return str(user_id)
+
+
+def _prepare_icon_attachment(icon_data: Optional[str]):
+    """Return (file_obj, url) for an activity icon.
+    If icon_data is an HTTP URL, return (None, url). If it's a local path, return (discord.File, attachment-url).
+    """
+    if not icon_data:
+        return None, None
+    if icon_data.startswith('http://') or icon_data.startswith('https://'):
+        return None, icon_data
+    # treat as local path
+    try:
+        if os.path.exists(icon_data):
+            fname = os.path.basename(icon_data)
+            return discord.File(icon_data, filename=fname), f'attachment://{fname}'
+    except Exception:
+        pass
+    return None, None
+
+
 
 
 
@@ -373,6 +463,45 @@ async def on_ready():
     await bot.change_presence(activity=discord.Game(name='/gnaij'))
     print('Bot is ready.')
 
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    try:
+        # Match whole word 'gnaij' (case-insensitive)
+        if re.search(r"\bgnaij\b", message.content, flags=re.IGNORECASE):
+            # Respect allowed channels similar to check_channel
+            if message.guild:
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute('SELECT channel_id FROM allowed_channels WHERE guild_id = ?', (message.guild.id,))
+                allowed_channels = [r['channel_id'] for r in cursor.fetchall()]
+                conn.close()
+                if allowed_channels and message.channel.id not in allowed_channels:
+                    await bot.process_commands(message)
+                    return
+
+            # Fetch a random quote and post it publicly
+            try:
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute('SELECT id, text FROM quotes ORDER BY RANDOM() LIMIT 1')
+                row = cursor.fetchone()
+                conn.close()
+                if not row:
+                    await message.channel.send('No quotes available.')
+                else:
+                    await message.channel.send(row['text'])
+            except Exception as e:
+                print(f'Error in on_message gnaij handler: {e}')
+
+    finally:
+        # Allow other command processing (prefix-based)
+        await bot.process_commands(message)
+
 def check_channel(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return True
@@ -401,6 +530,8 @@ async def activity_autocomplete(
     return [app_commands.Choice(name=a, value=a) for a in filtered][:25]
 
 activity = app_commands.Group(name='activity', description='Manage activities')
+
+session = app_commands.Group(name='session', description='Manage sessions')
 
 @activity.command(name='add', description='Add a new activity/commitment to track')
 @app_commands.check(lambda i: check_channel(i))
@@ -435,7 +566,7 @@ async def activity_remove(interaction: discord.Interaction, name: str):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
+        cursor.execute('SELECT id, icon_data FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
         activity_row = cursor.fetchone()
 
         if not activity_row:
@@ -443,6 +574,18 @@ async def activity_remove(interaction: discord.Interaction, name: str):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
+
+        # delete stored icon file if present
+        try:
+            old_icon = activity_row.get('icon_data') if 'icon_data' in activity_row.keys() else None
+            if old_icon and not (old_icon.startswith('http://') or old_icon.startswith('https://')):
+                try:
+                    if os.path.exists(old_icon):
+                        os.remove(old_icon)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         cursor.execute('DELETE FROM activities WHERE id = ?', (activity_row['id'],))
         conn.commit()
@@ -492,21 +635,142 @@ async def activity_icon(interaction: discord.Interaction, name: str, image: disc
         conn = get_db()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
+        cursor.execute('SELECT id, icon_data FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
         activity = cursor.fetchone()
         if not activity:
             embed = discord.Embed(description=f'Activity **{name}** not found!', color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             conn.close()
             return
+        # delete existing local icon file if present (we'll replace it)
+        try:
+            old_icon = activity.get('icon_data') if 'icon_data' in activity.keys() else None
+            if old_icon and not (old_icon.startswith('http://') or old_icon.startswith('https://')):
+                try:
+                    if os.path.exists(old_icon):
+                        os.remove(old_icon)
+                except Exception:
+                    # ignore removal failures
+                    pass
+        except Exception:
+            pass
 
-        cursor.execute('UPDATE activities SET icon_data = ? WHERE id = ?', (image.url, activity['id']))
+        # persist the attachment to local storage to avoid ephemeral CDN URLs
+        os.makedirs('activity_icons', exist_ok=True)
+        try:
+            data = await image.read()
+            ext = os.path.splitext(image.filename)[1] or '.png'
+            fname = f"{activity['id']}{ext}"
+            path = os.path.join('activity_icons', fname)
+            with open(path, 'wb') as f:
+                f.write(data)
+            cursor.execute('UPDATE activities SET icon_data = ? WHERE id = ?', (path, activity['id']))
+        except Exception:
+            # fallback to storing remote url if saving fails
+            cursor.execute('UPDATE activities SET icon_data = ? WHERE id = ?', (image.url, activity['id']))
+
         conn.commit()
-        conn.close()
-
+        # prepare embed and possible attachment (prefer the saved local path)
+        file_obj, img_url = _prepare_icon_attachment(path)
         embed = discord.Embed(description=f'Icon set for **{name}**!', color=discord.Color.green())
-        embed.set_image(url=image.url)
-        await interaction.response.send_message(embed=embed)
+        if img_url:
+            embed.set_image(url=img_url)
+        if file_obj:
+            await interaction.response.send_message(embed=embed, file=file_obj)
+        else:
+            await interaction.response.send_message(embed=embed)
+
+        # If the invoking user (not admin-target) hasn't confirmed a timezone, prompt them to select one
+        try:
+            if target_user.id == interaction.user.id:
+                invoking_tz, tz_confirmed = get_user_timezone_and_confirmed(interaction.user.id)
+                if not invoking_tz or not tz_confirmed:
+                    class TimezoneSelectPrompt(discord.ui.View):
+                        def __init__(self, *, timeout=120):
+                            super().__init__(timeout=timeout)
+                            options = [
+                                discord.SelectOption(label='UTC', value='UTC'),
+                                discord.SelectOption(label='America/New_York (US/Eastern)', value='America/New_York'),
+                                discord.SelectOption(label='America/Chicago (US/Central)', value='America/Chicago'),
+                                discord.SelectOption(label='America/Denver (US/Mountain)', value='America/Denver'),
+                                discord.SelectOption(label='America/Los_Angeles (US/Pacific)', value='America/Los_Angeles'),
+                                discord.SelectOption(label='America/Anchorage', value='America/Anchorage'),
+                                discord.SelectOption(label='Pacific/Honolulu', value='Pacific/Honolulu'),
+                                discord.SelectOption(label='Europe/London', value='Europe/London'),
+                                discord.SelectOption(label='Europe/Paris', value='Europe/Paris'),
+                                discord.SelectOption(label='Europe/Berlin', value='Europe/Berlin'),
+                                discord.SelectOption(label='Europe/Moscow', value='Europe/Moscow'),
+                                discord.SelectOption(label='Africa/Johannesburg', value='Africa/Johannesburg'),
+                                discord.SelectOption(label='Asia/Dubai', value='Asia/Dubai'),
+                                discord.SelectOption(label='Asia/Kolkata', value='Asia/Kolkata'),
+                                discord.SelectOption(label='Asia/Bangkok', value='Asia/Bangkok'),
+                                discord.SelectOption(label='Asia/Shanghai', value='Asia/Shanghai'),
+                                discord.SelectOption(label='Asia/Tokyo', value='Asia/Tokyo'),
+                                discord.SelectOption(label='Asia/Seoul', value='Asia/Seoul'),
+                                discord.SelectOption(label='Australia/Sydney', value='Australia/Sydney'),
+                                discord.SelectOption(label='America/Sao_Paulo', value='America/Sao_Paulo'),
+                                discord.SelectOption(label='America/Mexico_City', value='America/Mexico_City'),
+                                discord.SelectOption(label='America/Argentina/Buenos_Aires', value='America/Argentina/Buenos_Aires'),
+                                discord.SelectOption(label='Other (type IANA)', value='other'),
+                            ]
+
+                            self.select = discord.ui.Select(placeholder='Select your timezone', min_values=1, max_values=1, options=options)
+                            self.select.callback = self.on_select
+                            self.add_item(self.select)
+
+                        async def on_select(self, interaction: discord.Interaction):
+                            val = self.select.values[0]
+                            if val == 'other':
+                                class TzModal(discord.ui.Modal, title='Enter IANA timezone'):
+                                    tz_input = discord.ui.TextInput(label='Timezone (e.g. America/Los_Angeles)', style=discord.TextStyle.short)
+
+                                    async def on_submit(modal_self, modal_interaction: discord.Interaction):
+                                        tz_val = modal_self.tz_input.value.strip()
+                                        try:
+                                            ZoneInfo(tz_val)
+                                        except Exception:
+                                            await modal_interaction.response.send_message('Invalid timezone name.', ephemeral=True)
+                                            return
+                                        try:
+                                            now_local = datetime.now()
+                                            server_off = datetime.now().astimezone().utcoffset() or timedelta(0)
+                                            actual_off = ZoneInfo(tz_val).utcoffset(now_local) or timedelta(0)
+                                            delta = int((actual_off - server_off).total_seconds())
+                                            if delta != 0:
+                                                r = _shift_user_sessions_in_db(modal_interaction.user.id, delta)
+                                            else:
+                                                r = {'shifted': 0, 'errors': 0}
+                                        except Exception:
+                                            r = {'shifted': 0, 'errors': 1}
+                                        set_user_timezone(modal_interaction.user.id, tz_val)
+                                        await modal_interaction.response.send_message(f'Timezone set to **{tz_val}**. Migrated sessions: {r}.', ephemeral=True)
+
+                                await interaction.response.send_modal(TzModal())
+                                return
+
+                            try:
+                                ZoneInfo(val)
+                                try:
+                                    now_local = datetime.now()
+                                    server_off = datetime.now().astimezone().utcoffset() or timedelta(0)
+                                    actual_off = ZoneInfo(val).utcoffset(now_local) or timedelta(0)
+                                    delta = int((actual_off - server_off).total_seconds())
+                                    if delta != 0:
+                                        r = _shift_user_sessions_in_db(interaction.user.id, delta)
+                                    else:
+                                        r = {'shifted': 0, 'errors': 0}
+                                except Exception:
+                                    r = {'shifted': 0, 'errors': 1}
+                                set_user_timezone(interaction.user.id, val)
+                                await interaction.response.send_message(f'Timezone set to **{val}**. Migrated sessions: {r}.', ephemeral=True)
+                            except Exception:
+                                await interaction.response.send_message('Failed to set timezone.', ephemeral=True)
+
+                    view = TimezoneSelectPrompt()
+                    invoking_tz, tz_confirmed = get_user_timezone_and_confirmed(interaction.user.id)
+                    await interaction.followup.send('Please select your timezone (this will migrate your historical sessions).', ephemeral=True, view=view)
+        except Exception:
+            pass
     except Exception as e:
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -573,9 +837,13 @@ async def clockin(interaction: discord.Interaction, activity_name: str = None, u
         conn.close()
 
         embed = discord.Embed(description=f'{target_user.mention} clocked in to **{activity["name"]}**', color=discord.Color.green())
-        if icon_url:
-            embed.set_image(url=icon_url)
-        await interaction.response.send_message(embed=embed)
+        file_obj, img_url = _prepare_icon_attachment(icon_url)
+        if img_url:
+            embed.set_image(url=img_url)
+        if file_obj:
+            await interaction.response.send_message(embed=embed, file=file_obj)
+        else:
+            await interaction.response.send_message(embed=embed)
     except Exception as e:
         embed = discord.Embed(description=f'Error: {str(e)}', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -712,7 +980,10 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             ('all', None, 'All-Time'),
         ]
 
-        embed_stats = discord.Embed(title=f"{user.mention}'s Time Tracking", color=discord.Color.blurple())
+        # Use the same display style as leaderboard for clickable mentions
+        display_name = await resolve_user_display(user.id, interaction.guild)
+        embed_stats = discord.Embed(title='Time Tracking', color=discord.Color.blurple())
+        embed_stats.add_field(name='User', value=display_name, inline=False)
 
         for _, start_date, label in periods:
             if start_date is None:
@@ -809,7 +1080,9 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             most_in_day = max(daily_stats.values())
             total_hours = sum(daily_stats.values())
             avg_per_day = total_hours / len(daily_stats) if daily_stats else 0
-            streak = calculate_streak(daily_stats)
+            # prefer timezone of the user prompting the command; if not set/confirmed, we will include a prompt view
+            invoking_tz, tz_confirmed = get_user_timezone_and_confirmed(interaction.user.id)
+            streak = calculate_streak(daily_stats, invoking_tz)
 
             embed_metrics = discord.Embed(title='Key Metrics', color=discord.Color.orange())
             embed_metrics.add_field(name='Streak', value=f'{streak} days', inline=True)
@@ -821,7 +1094,114 @@ async def stats(interaction: discord.Interaction, user: discord.User = None):
             embeds.append(embed_metrics)
 
         conn.close()
-        await interaction.response.send_message(embeds=embeds, ephemeral=True)
+        # if user's timezone is missing or unconfirmed, attach a timezone-select view to the ephemeral response
+        view = None
+        try:
+            invoking_tz, tz_confirmed = get_user_timezone_and_confirmed(interaction.user.id)
+            if not invoking_tz or not tz_confirmed:
+                # build timezone select view
+                class TimezoneSelect(discord.ui.View):
+                    def __init__(self, *, timeout=120):
+                        super().__init__(timeout=timeout)
+                        options = [
+                            discord.SelectOption(label='UTC', value='UTC'),
+                            discord.SelectOption(label='America/New_York (US/Eastern)', value='America/New_York'),
+                            discord.SelectOption(label='America/Chicago (US/Central)', value='America/Chicago'),
+                            discord.SelectOption(label='America/Denver (US/Mountain)', value='America/Denver'),
+                            discord.SelectOption(label='America/Los_Angeles (US/Pacific)', value='America/Los_Angeles'),
+                            discord.SelectOption(label='America/Anchorage', value='America/Anchorage'),
+                            discord.SelectOption(label='Pacific/Honolulu', value='Pacific/Honolulu'),
+                            discord.SelectOption(label='Europe/London', value='Europe/London'),
+                            discord.SelectOption(label='Europe/Paris', value='Europe/Paris'),
+                            discord.SelectOption(label='Europe/Berlin', value='Europe/Berlin'),
+                            discord.SelectOption(label='Europe/Moscow', value='Europe/Moscow'),
+                            discord.SelectOption(label='Africa/Johannesburg', value='Africa/Johannesburg'),
+                            discord.SelectOption(label='Asia/Dubai', value='Asia/Dubai'),
+                            discord.SelectOption(label='Asia/Kolkata', value='Asia/Kolkata'),
+                            discord.SelectOption(label='Asia/Bangkok', value='Asia/Bangkok'),
+                            discord.SelectOption(label='Asia/Shanghai', value='Asia/Shanghai'),
+                            discord.SelectOption(label='Asia/Tokyo', value='Asia/Tokyo'),
+                            discord.SelectOption(label='Asia/Seoul', value='Asia/Seoul'),
+                            discord.SelectOption(label='Australia/Sydney', value='Australia/Sydney'),
+                            discord.SelectOption(label='America/Sao_Paulo', value='America/Sao_Paulo'),
+                            discord.SelectOption(label='America/Mexico_City', value='America/Mexico_City'),
+                            discord.SelectOption(label='America/Argentina/Buenos_Aires', value='America/Argentina/Buenos_Aires'),
+                            discord.SelectOption(label='Other (type IANA)', value='other'),
+                        ]
+
+                        self.select = discord.ui.Select(placeholder='Select your timezone', min_values=1, max_values=1, options=options)
+                        self.select.callback = self.on_select
+                        self.add_item(self.select)
+
+                        async def on_select(self, interaction: discord.Interaction):
+                            val = self.select.values[0]
+                            if val == 'other':
+                                # show modal to input IANA name
+                                class TzModal(discord.ui.Modal, title='Enter IANA timezone'):
+                                    tz_input = discord.ui.TextInput(label='Timezone (e.g. America/Los_Angeles)', style=discord.TextStyle.short)
+
+                                    async def on_submit(modal_self, modal_interaction: discord.Interaction):
+                                        tz_val = modal_self.tz_input.value.strip()
+                                        try:
+                                            ZoneInfo(tz_val)
+                                        except Exception:
+                                            await modal_interaction.response.send_message('Invalid timezone name.', ephemeral=True)
+                                            return
+                                        # compute shift from server-local time to selected timezone and migrate user's sessions
+                                        try:
+                                            now_local = datetime.now()
+                                            server_off = datetime.now().astimezone().utcoffset() or timedelta(0)
+                                            actual_off = ZoneInfo(tz_val).utcoffset(now_local) or timedelta(0)
+                                            delta = int((actual_off - server_off).total_seconds())
+                                            if delta != 0:
+                                                r = _shift_user_sessions_in_db(modal_interaction.user.id, delta)
+                                            else:
+                                                r = {'shifted': 0, 'errors': 0}
+                                        except Exception:
+                                            r = {'shifted': 0, 'errors': 1}
+                                        set_user_timezone(modal_interaction.user.id, tz_val)
+                                        await modal_interaction.response.send_message(f'Timezone set to **{tz_val}**. Migrated sessions: {r}.', ephemeral=True)
+
+                                await interaction.response.send_modal(TzModal())
+                                return
+
+                            # direct set
+                            try:
+                                ZoneInfo(val)
+                                # compute shift and migrate
+                                try:
+                                    now_local = datetime.now()
+                                    server_off = datetime.now().astimezone().utcoffset() or timedelta(0)
+                                    actual_off = ZoneInfo(val).utcoffset(now_local) or timedelta(0)
+                                    delta = int((actual_off - server_off).total_seconds())
+                                    if delta != 0:
+                                        r = _shift_user_sessions_in_db(interaction.user.id, delta)
+                                    else:
+                                        r = {'shifted': 0, 'errors': 0}
+                                except Exception:
+                                    r = {'shifted': 0, 'errors': 1}
+                                set_user_timezone(interaction.user.id, val)
+                                await interaction.response.send_message(f'Timezone set to **{val}**. Migrated sessions: {r}.', ephemeral=True)
+                            except Exception:
+                                await interaction.response.send_message('Failed to set timezone.', ephemeral=True)
+
+                view = TimezoneSelect()
+        except Exception:
+            view = None
+
+        # Send the main stats embed first
+        await interaction.response.send_message(embeds=embeds, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+
+        # If user's timezone is missing/unconfirmed, send a separate ephemeral follow-up with the timezone selector
+        try:
+            invoking_tz, tz_confirmed = get_user_timezone_and_confirmed(interaction.user.id)
+            if not invoking_tz or not tz_confirmed:
+                # view was constructed above as TimezoneSelect() if needed
+                if view:
+                    await interaction.followup.send('Please select your timezone (this will migrate your historical sessions).', ephemeral=True, view=view)
+        except Exception:
+            pass
     except Exception as e:
         await interaction.response.send_message(f'Error: {str(e)}', ephemeral=True)
 
@@ -861,9 +1241,7 @@ async def status(interaction: discord.Interaction):
         await interaction.response.send_message(f'Error: {str(e)}')
 
 
-@bot.tree.command(name='pause', description='Pause your current clock')
-@app_commands.check(lambda i: check_channel(i))
-async def pause(interaction: discord.Interaction):
+async def session_pause(interaction: discord.Interaction):
     now = datetime.now()
     try:
         conn = get_db()
@@ -900,9 +1278,7 @@ async def pause(interaction: discord.Interaction):
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
 
-@bot.tree.command(name='resume', description='Resume your paused clock')
-@app_commands.check(lambda i: check_channel(i))
-async def resume(interaction: discord.Interaction):
+async def session_resume(interaction: discord.Interaction):
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -949,8 +1325,10 @@ def generate_heatmap(daily_stats, start_date):
             square = '🟨'
         elif hours < 6:
             square = '🟧'
-        else:
+        elif hours < 8:
             square = '🟥'
+        else:
+            square = '🟪'
 
         current_week.append(square)
 
@@ -981,23 +1359,46 @@ def generate_heatmap(daily_stats, start_date):
 
     max_label_width = max(len(label) for label, _ in visible_rows)
     padded_rows = [f"{label:<{max_label_width}} | {cells}" for label, cells in visible_rows]
-    legend = '⬜ 0h  🟩 <2h  🟨 2-4h  🟧 4-6h  🟥 6h+'
+    legend = '⬜ 0h  🟩 <2h  🟨 2-4h\n🟧 4-6h  🟥 6-8h  🟪 8h+'
     return f"```\n{'\n'.join(padded_rows)}\n{legend}\n```"
 
-def calculate_streak(daily_stats):
+def calculate_streak(daily_stats: dict, tz: str | None = None) -> int:
+    """Calculate consecutive-day streak ending today in the given timezone.
+
+    Rules:
+    - Streak only counts if the user has an entry for "today" in their local timezone.
+      If they didn't track today (in their timezone), the streak is 0 (resets at midnight
+      following the last tracked day).
+    - Counts backwards day-by-day while dates exist in daily_stats.
+    - `daily_stats` keys are 'YYYY-MM-DD' strings.
+    """
     if not daily_stats:
         return 0
 
-    today = datetime.now().strftime('%Y-%m-%d')
+    # determine 'today' in user's timezone
+    try:
+        if tz:
+            now_local = datetime.now(ZoneInfo(tz))
+        else:
+            now_local = datetime.now()
+    except Exception:
+        # fallback to naive server time
+        now_local = datetime.now()
 
+    today_str = now_local.date().isoformat()
+
+    # If user hasn't tracked today in their local timezone, streak resets
+    if today_str not in daily_stats:
+        return 0
+
+    # count consecutive days including today
     streak = 0
-    current_date = datetime.fromisoformat(today)
-
+    current = now_local.date()
     while True:
-        day_str = current_date.strftime('%Y-%m-%d')
+        day_str = current.isoformat()
         if day_str in daily_stats:
             streak += 1
-            current_date -= timedelta(days=1)
+            current = current - timedelta(days=1)
         else:
             break
 
@@ -1045,8 +1446,7 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
             user_id = row['user_id']
             hours = (row['seconds'] or 0) / 3600
             try:
-                user = await bot.fetch_user(user_id)
-                username = user.mention
+                username = await resolve_user_display(user_id, interaction.guild)
             except:
                 username = f'User {user_id}'
 
@@ -1060,7 +1460,41 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 admin = app_commands.Group(name='admin', description='Manage admin roles')
-session = app_commands.Group(name='session', description='Manage sessions')
+
+tz_group = app_commands.Group(name='timezone', description='Manage your local timezone')
+
+
+@tz_group.command(name='set', description='Set your timezone (IANA name, e.g. Europe/London)')
+@app_commands.describe(tz='IANA timezone name (e.g. America/Los_Angeles)')
+@app_commands.check(lambda i: check_channel(i))
+async def timezone_set(interaction: discord.Interaction, tz: str):
+    try:
+        # validate
+        try:
+            ZoneInfo(tz)
+        except ZoneInfoNotFoundError:
+            await interaction.response.send_message('Invalid timezone name. Use an IANA timezone (e.g. America/Los_Angeles).', ephemeral=True)
+            return
+
+        set_user_timezone(interaction.user.id, tz)
+        await interaction.response.send_message(f'Your timezone has been set to **{tz}**.', ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+@tz_group.command(name='view', description='View your configured timezone')
+@app_commands.check(lambda i: check_channel(i))
+async def timezone_view(interaction: discord.Interaction):
+    try:
+        tz = get_user_timezone(interaction.user.id)
+        if not tz:
+            await interaction.response.send_message('No timezone configured. Set one with `/timezone set <tz>`', ephemeral=True)
+            return
+        await interaction.response.send_message(f'Your timezone is **{tz}**.', ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+bot.tree.add_command(tz_group)
 
 @admin.command(name='add', description='Add an admin role')
 @app_commands.describe(role='Select a role to add as admin')
@@ -1106,6 +1540,129 @@ async def admin_remove(interaction: discord.Interaction, role: discord.Role):
     else:
         embed = discord.Embed(description=f'{role.mention} is not an admin role!', color=discord.Color.red())
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+    def _parse_iso_ts(val: str) -> datetime | None:
+        if not val:
+            return None
+        try:
+            return datetime.fromisoformat(val)
+        except Exception:
+            try:
+                return datetime.fromisoformat(val.replace('T', ' '))
+            except Exception:
+                try:
+                    # fallback: treat as epoch seconds
+                    if str(val).isdigit():
+                        return datetime.fromtimestamp(int(val))
+                except Exception:
+                    return None
+        return None
+
+
+    def _shift_user_sessions_in_db(user_id: int, delta_seconds: int) -> dict:
+        """Shift sessions for a user by delta_seconds. Returns summary dict."""
+        if delta_seconds == 0:
+            return {'shifted': 0, 'errors': 0}
+
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, clock_in, clock_out FROM sessions WHERE user_id = ? AND (clock_in IS NOT NULL OR clock_out IS NOT NULL)', (user_id,))
+        rows = cursor.fetchall()
+        shifted = 0
+        errors = 0
+        for row in rows:
+            sid = row['id']
+            ci_raw = row['clock_in']
+            co_raw = row['clock_out']
+            try:
+                ci = _parse_iso_ts(ci_raw) if ci_raw else None
+                co = _parse_iso_ts(co_raw) if co_raw else None
+
+                new_ci = (ci + timedelta(seconds=delta_seconds)) if ci else None
+                new_co = (co + timedelta(seconds=delta_seconds)) if co else None
+
+                if new_ci and new_co:
+                    new_duration = int(round((new_co - new_ci).total_seconds()))
+                    new_date = new_ci.date().isoformat()
+                    cursor.execute('UPDATE sessions SET clock_in = ?, clock_out = ?, duration_seconds = ?, date = ? WHERE id = ?', (new_ci.isoformat(), new_co.isoformat(), new_duration, new_date, sid))
+                elif new_ci and not new_co:
+                    new_date = new_ci.date().isoformat()
+                    cursor.execute('UPDATE sessions SET clock_in = ?, date = ? WHERE id = ?', (new_ci.isoformat(), new_date, sid))
+                elif not new_ci and new_co:
+                    # unlikely: only clock_out exists; shift clock_out and leave duration naive
+                    cursor.execute('UPDATE sessions SET clock_out = ? WHERE id = ?', (new_co.isoformat(), sid))
+                shifted += 1
+            except Exception:
+                errors += 1
+                continue
+
+        conn.commit()
+        conn.close()
+        return {'shifted': shifted, 'errors': errors}
+
+
+    # @admin.command(name='import_timezones', description='Bulk import user timezones from a JSON file (admin only)')
+    # @app_commands.describe(file='JSON file mapping user_id -> IANA timezone', assumed_tz='If provided, shift existing session timestamps from this assumed tz to the user tz')
+    # @app_commands.check(lambda i: check_channel(i))
+    async def _admin_import_timezones_removed(interaction: discord.Interaction, file: discord.Attachment, assumed_tz: str = None):
+        if not is_admin_app(interaction):
+            await interaction.response.send_message('Only admins can run this!', ephemeral=True)
+            return
+
+        try:
+            raw = await file.read()
+            import json
+            mapping = json.loads(raw)
+            if not isinstance(mapping, dict):
+                await interaction.response.send_message('Invalid JSON format: expected object mapping user_id->timezone', ephemeral=True)
+                return
+
+            results = {'processed': 0, 'set': 0, 'shifted_total': 0, 'errors': 0}
+            now = datetime.now()
+
+            for uid_str, tz in mapping.items():
+                # uid_str may be a numeric user ID or a username/display (name or name#discrim)
+                uid = None
+                try:
+                    uid = int(uid_str)
+                except Exception:
+                    # attempt to resolve in the invoking guild's members
+                    if interaction.guild:
+                        member = None
+                        for m in interaction.guild.members:
+                            if m.name == uid_str or m.display_name == uid_str or f"{m.name}#{m.discriminator}" == uid_str:
+                                member = m
+                                break
+                        if member:
+                            uid = member.id
+                    if uid is None:
+                        results['errors'] += 1
+                        continue
+
+                # validate timezone
+                try:
+                    ZoneInfo(tz)
+                except Exception:
+                    results['errors'] += 1
+                    continue
+
+                # set timezone (confirmed)
+                try:
+                    set_user_timezone(uid, tz)
+                    results['set'] += 1
+                except Exception:
+                    results['errors'] += 1
+                    continue
+
+                # if assumed_tz provided, compute delta from assumed->actual at current time and shift
+                # (bulk import migration removed per request - migration will occur when the user confirms their timezone)
+
+                results['processed'] += 1
+
+            await interaction.response.send_message(f"Import complete: {results}", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'Error importing: {e}', ephemeral=True)
 
 @admin.command(name='list', description='List all admin roles')
 @app_commands.check(lambda i: check_channel(i))
@@ -1184,6 +1741,65 @@ async def session_list(interaction: discord.Interaction, user: discord.User = No
         await interaction.response.send_message(embeds=embeds, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+async def session_cancel(interaction: discord.Interaction, user: discord.User = None):
+    try:
+        target = user if user else interaction.user
+        # if cancelling another user, require admin
+        if user and not is_admin_app(interaction):
+            await interaction.response.send_message('Only admins can cancel other users\' sessions.', ephemeral=True)
+            return
+
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, user_id, activity_id, clock_in, paused_at
+            FROM sessions
+            WHERE user_id = ? AND clock_out IS NULL
+              AND (clock_in IS NOT NULL OR paused_at IS NOT NULL)
+            ORDER BY id DESC
+            LIMIT 1
+        ''', (target.id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            if target == interaction.user:
+                await interaction.response.send_message('You have no active session to cancel.', ephemeral=True)
+            else:
+                await interaction.response.send_message(f'{target.mention} has no active session to cancel.', ephemeral=True)
+            return
+
+        cursor.execute('DELETE FROM sessions WHERE id = ?', (row['id'],))
+        conn.commit()
+        conn.close()
+
+        if target == interaction.user:
+            await interaction.response.send_message('Your active session has been cancelled and removed.', ephemeral=True)
+        else:
+            await interaction.response.send_message(f'Cancelled active session for {target.mention}.', ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+# Top-level aliases for session commands so users can use `/pause`, `/resume`, `/cancel`
+@bot.tree.command(name='pause', description='Pause your current clock')
+@app_commands.check(lambda i: check_channel(i))
+async def pause(interaction: discord.Interaction):
+    await session_pause(interaction)
+
+
+@bot.tree.command(name='resume', description='Resume your paused clock')
+@app_commands.check(lambda i: check_channel(i))
+async def resume(interaction: discord.Interaction):
+    await session_resume(interaction)
+
+
+@bot.tree.command(name='cancel', description='Cancel and delete your active clock-in session (admin may specify a user)')
+@app_commands.describe(user='Optional: mention a member to cancel their active session (admin only)')
+@app_commands.check(lambda i: check_channel(i))
+async def cancel(interaction: discord.Interaction, user: discord.User = None):
+    await session_cancel(interaction, user)
 
 
 @session.command(name='tag', description='Add a note to your active or selected session')
@@ -1541,11 +2157,11 @@ async def say(interaction: discord.Interaction, message: str):
     await interaction.response.send_message(message)
 
 
-@activity.command(name='whatif', description='Estimate earnings for an activity at given hourly wage')
+@activity.command(name='if', description='Estimate earnings for an activity at given hourly wage')
 @app_commands.describe(activity_name='Activity name to evaluate', wage='Hourly wage (e.g. 10.5)')
 @app_commands.autocomplete(activity_name=activity_autocomplete)
 @app_commands.check(lambda i: check_channel(i))
-async def activity_whatif(interaction: discord.Interaction, activity_name: str, wage: float):
+async def activity_if(interaction: discord.Interaction, activity_name: str, wage: float):
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -1572,20 +2188,72 @@ async def activity_whatif(interaction: discord.Interaction, activity_name: str, 
             await interaction.response.send_message(f'No recorded sessions for **{activity["name"]}**', ephemeral=True)
             return
 
-        lines = [f'What-if for **{activity["name"]}** at ${wage:.2f}/hr:']
+        lines = [f'If for **{activity["name"]}** at ${wage:.2f}/hr:']
         for r in rows:
             uid = r['user_id']
             hours = (r['seconds'] or 0) / 3600
             earnings = hours * wage
             try:
-                user = await bot.fetch_user(uid)
-                uname = user.mention
+                uname = await resolve_user_display(uid, interaction.guild)
             except:
                 uname = f'User {uid}'
             lines.append(f'{uname}: {format_time(hours)} → ${earnings:,.2f}')
 
         # send ephemeral
         await interaction.response.send_message('\n'.join(lines[:200]), ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f'Error: {e}', ephemeral=True)
+
+
+@activity.command(name='default', description='Set or view the guild default activity')
+@app_commands.autocomplete(name=activity_autocomplete)
+@app_commands.describe(name='Name of the activity to set as default (omit to view)')
+@app_commands.check(lambda i: check_channel(i))
+async def activity_default(interaction: discord.Interaction, name: str = None):
+    if interaction.guild is None:
+        await interaction.response.send_message('This command only works in a server (guild).', ephemeral=True)
+        return
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        if not name:
+            default_id = get_default_activity_for_guild(interaction.guild.id)
+            if not default_id:
+                await interaction.response.send_message('No default activity set for this server.', ephemeral=True)
+                conn.close()
+                return
+            cursor.execute('SELECT id, name, icon_data FROM activities WHERE id = ?', (default_id,))
+            act = cursor.fetchone()
+            conn.close()
+            if not act:
+                await interaction.response.send_message('Configured default activity could not be found.', ephemeral=True)
+                return
+            embed = discord.Embed(title='Default Activity', description=f'**{act["name"]}**', color=discord.Color.blurple())
+            file_obj, img_url = _prepare_icon_attachment(act['icon_data'])
+            if img_url:
+                embed.set_image(url=img_url)
+            if file_obj:
+                await interaction.response.send_message(embed=embed, file=file_obj)
+            else:
+                await interaction.response.send_message(embed=embed)
+            return
+
+        # setting default requires admin
+        if not is_admin_app(interaction):
+            await interaction.response.send_message('You need to be an admin to set the default activity.', ephemeral=True)
+            conn.close()
+            return
+
+        cursor.execute('SELECT id FROM activities WHERE LOWER(name) = LOWER(?)', (name,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            await interaction.response.send_message(f'Activity **{name}** not found!', ephemeral=True)
+            return
+
+        set_default_activity_for_guild(interaction.guild.id, row['id'])
+        await interaction.response.send_message(f'Default activity set to **{name}**', ephemeral=False)
     except Exception as e:
         await interaction.response.send_message(f'Error: {e}', ephemeral=True)
 
@@ -1603,13 +2271,13 @@ async def commands_help(interaction: discord.Interaction):
             ('/activity remove <name>', 'Remove an activity (admin only)'),
             ('/activity list', 'List all activities'),
             ('/activity icon <name> <image>', 'Set an icon for an activity (admin only)'),
-            ('/activity whatif <name> <wage>', 'Estimate earnings for an activity'),
+            ('/activity if <name> <wage>', 'Estimate earnings for an activity'),
         ]),
         ('Time Tracking', [
-            ('/clockin <activity> [user]', 'Clock in to an activity'),
-            ('/clockout [user]', 'Clock out of current activity'),
-            ('/pause', 'Pause your current clock'),
-            ('/resume', 'Resume your paused clock'),
+                ('/clockin <activity> [user]', 'Clock in to an activity'),
+                ('/clockout [user]', 'Clock out of current activity'),
+                ('/session pause', 'Pause your current clock'),
+                ('/session resume', 'Resume your paused clock'),
             ('/status', 'View your current status'),
         ]),
         ('Statistics', [
