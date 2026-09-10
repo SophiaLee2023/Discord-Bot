@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable, Mapping
 
-from time_utils import format_time
+from utils.time_utils import format_seconds
 
 
 def session_duration_seconds_sql(alias: str = 'sessions') -> str:
@@ -40,11 +40,11 @@ def build_session_list_fields(rows: Iterable[Mapping[str, object]], hide_activit
         for session in sessions:
             state = f' ({session["state"]})' if session['state'] else ''
             if hide_activity_name:
-                entry = f'**#{session["id"]}** — {format_time(float(session["duration_seconds"]) / 3600)}{state}'
+                entry = f'**#{session["id"]}** — {format_seconds(session["duration_seconds"])}{state}'
             else:
                 entry = (
                     f'**#{session["id"]}** · {session["activity_name"]} — '
-                    f'{format_time(float(session["duration_seconds"]) / 3600)}{state}'
+                    f'{format_seconds(session["duration_seconds"])}{state}'
                 )
             if session['note']:
                 entry += f'  • {session["note"]}'

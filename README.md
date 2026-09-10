@@ -1,155 +1,222 @@
 # Discord Time Tracking Bot
 
-A Discord bot for tracking time spent on activities/commitments with per-user statistics.
+A Discord bot for tracking time spent on activities/commitments, with per-user
+statistics, an activity heatmap, and manual session editing.
 
 ## Features
 
-- **Activity Management**: Add and list activities to track
-- **Time Tracking**: Clock in/out of activities
-- **Per-User Tracking**: Each user tracks their own time
-- **Statistics**: View time tracked for:
-  - Today
-  - This week
-  - All-time (per activity)
-- **Current Status**: Check what you're currently clocked into and how long
+- **Activity management** — create activities, give them icons, pick a server default
+- **Time tracking** — clock in/out, pause, resume, cancel
+- **Per-user stats** — today, this week, all-time, plus a 12-week heatmap and key metrics
+- **Manual sessions** — add, edit, combine, tag, and remove recorded sessions
+- **Leaderboards** — rank everyone who tracked a given activity
+- **Per-user timezones** — day boundaries and streaks follow each member's own timezone
 
 ## Setup
 
-1. **Install dependencies**:
+1. **Install dependencies**
+
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Create a Discord Bot** (if you haven't already):
-   - Go to [Discord Developer Portal](https://discord.com/developers/applications)
-   - Create a new application
-   - Go to "Bot" section and click "Add Bot"
-   - Copy the bot token
+2. **Create a Discord bot** at the [Discord Developer Portal](https://discord.com/developers/applications),
+   add a bot to the application, and copy its token. Enable the **Server Members**
+   and **Message Content** privileged intents.
 
-3. **Configure the token**:
-   - The `.env` file should already have your `DISCORD_TOKEN`
-   - Make sure it's set correctly
+3. **Grant permissions** — `/impersonate` needs **Change Nickname** and
+   **Manage Roles**. Everything else works with the default permissions Discord
+   gives a bot on invite. The OAuth scopes are `bot` and `applications.commands`.
 
-4. **Run the bot**:
+4. **Configure the token** — put it in a `.env` file next to `main.py`:
+
+   ```
+   DISCORD_TOKEN=your-token-here
+   ```
+
+   Optionally set `BOT_DB` to point at a database outside the project directory,
+   which keeps it clear of anything that replaces the source files.
+
+5. **Run the bot**
+
    ```bash
    python main.py
    ```
 
+## Project layout
+
+```
+main.py               Startup, global channel check, error handling, event handlers
+bot_commands/         One module per feature area, each exposing register(tree)
+  activity_commands.py  /activity
+  tracking.py           /clockin /clockout /pause /resume /cancel
+  statistics.py         /stats /leaderboard (heatmap and streak logic)
+  session_commands.py   /session
+  user_timezone.py      /timezone
+  administration.py     /admin /channel
+  impersonate.py        /impersonate
+  quotes.py             /quote /gnaij /say
+  help_command.py       /commands
+utils/                Shared helpers, no command definitions
+  db.py                 Connection handling, schema creation and migration
+  permissions.py        Admin-role and channel checks (cached per guild)
+  icons.py              Activity icon storage
+  timezones.py          Timezone lookup, previewing, per-user resolution
+  activities.py         Activity lookup and autocomplete
+  discord_utils.py      Embed and reply helpers
+  time_utils.py         Duration and date parsing/formatting
+  session_utils.py      Session SQL and list rendering
+```
+
+Everything that persists lives in the SQLite database, so replacing the Python
+files never loses data — including activity icons.
+
+## The default activity
+
+Every command that takes an activity treats it as **optional**: `/clockin`,
+`/session add`, `/leaderboard`, and `/activity if`. Omit it and the command uses
+the server's default activity, set by an admin with `/activity default <name>`.
+
+If nothing is given and no default is configured, the command reports that
+rather than guessing — it will never silently pick an activity for you.
+
+## Input formats
+
+### Durations
+
+Anything that takes a duration accepts exactly these forms:
+
+| Input | Meaning |
+| --- | --- |
+| `120` | 120 minutes (a bare number is always minutes) |
+| `2h` | 2 hours |
+| `15m` | 15 minutes |
+| `45s` | 45 seconds |
+| `2h 15m` | 2 hours 15 minutes |
+| `2h 15m 45s` | 2 hours 15 minutes 45 seconds |
+| `2h:15m:45s` | same, colon-separated |
+| `2:15:45` | hours:minutes:seconds |
+
+Units must appear in descending order (`h`, then `m`, then `s`). A bare `M:S`
+such as `5:30` is **not** accepted — write `5m 30s` or `0:05:30`.
+
+Durations are always displayed back as `2h:15m:45s`, with minutes and seconds
+padded to two digits.
+
+### Dates
+
+Dates accept `YYYY-MM-DD`, `MM-DD`, or `MM-DD-YYYY`, and slashes work in place of
+dashes. Where a date is optional it defaults to today in your timezone.
+
 ## Commands
 
-All commands are slash commands and will appear in Discord's command preview when you type `/`.
+`<angle brackets>` are required, `[square brackets]` are optional.
 
-### Activity Management
-   - `/activity add <name>` - Add a new activity (admin only)
-   - `/activity remove <name>` - Remove an activity (admin only)
-   - `/activity list` - List all activities
-   - `/activity icon <name> <image>` - Set an icon for an activity (admin only)
-   - `/activity if <name> <wage>` - Estimate earnings for an activity
+### Activity management
+- `/activity add <name>` — add a new activity (admin only)
+- `/activity remove <name>` — remove an activity and its icon (admin only)
+- `/activity list` — list all activities
+- `/activity icon <name> <image>` — set an activity's icon (admin only)
+- `/activity default [name]` — set the server default activity to `name`, or omit it to view the current one (admin only to set)
+- `/activity if <wage> [activity]` — estimate everyone's earnings at an hourly wage; `activity` defaults to the server default
 
-### Time Tracking
-- `/clockin <activity_name> [user]` - Clock in to an activity (admins can optionally specify another user)
-- `/clockout [user]` - Clock out of current activity (admins can optionally specify another user)
- - `/pause` - Pause your current clock
- - `/resume` - Resume your paused clock
- - `/status` - View current status and elapsed time
- - `/cancel [user]` - Cancel and delete your active clock-in session (admin may specify another user)
+### Time tracking
+- `/clockin [activity] [user]` — start tracking time; `activity` defaults to the server default, `user` clocks in another member (admin only)
+- `/clockout [user]` — stop tracking and record the session; `user` clocks out another member (admin only)
+- `/pause` — pause your running clock
+- `/resume` — resume your paused clock
+- `/cancel [user]` — discard your active session without recording it; `user` targets another member (admin only)
 
 ### Statistics
-- `/stats [user]` - View your stats (today, this week, all-time) with heatmap and metrics
-- `/leaderboard <activity_name>` - View leaderboard for an activity (top 10 users)
-
-### Admin Role Management (Server Admin Only)
-- `/admin add <role>` - Add a role that can create activities
-- `/admin remove <role>` - Remove admin privileges from a role
-- `/admin list` - View all configured admin roles
-
-### Bot Channel Management (Server Admin Only)
-- `/channel add <channel>` - Restrict bot to work in a channel
-- `/channel remove <channel>` - Remove channel restriction
-- `/channel list` - View all allowed channels (if none set, bot works everywhere)
+- `/stats [user]` — today, this week, and all-time totals, a 12-week heatmap, and key metrics; `user` defaults to yourself
+- `/leaderboard [activity]` — top 10 members for an activity; `activity` defaults to the server default
 
 ### Sessions
-- `/session add <duration> [date] [activity] [user]` - Add a session. Durations accept minutes, `M:S`, or `H:M:S`; dates accept `YYYY-MM-DD`, `MM-DD`, or `MM-DD-YYYY` (defaults to today). Admins may add for other users.
-- `/session combine <ids>` - Combine sessions with the same user, activity, and date. Provide comma-separated IDs such as `11, 12, 13`; the earliest ID is kept.
-- `/session remove <id> [user]` - Remove a session by its numeric session id. Only the session owner or an admin may remove others' sessions.
-- `/session edit <id> [date] [duration]` - Edit a session's date and/or duration using the same date and duration formats. Only the session owner or an admin may edit other users' sessions.
-- `/session list [user]` - List sessions grouped by date (defaults to yourself). Each session line includes its numeric id for use with `/session remove` and `/session edit`. This list is visible only to the requesting user.
+- `/session add <duration> [date] [activity] [user]` — record a session that was never clocked; `date` defaults to today, `activity` to the server default, `user` adds for another member (admin only)
+- `/session list [user]` — list sessions grouped by date, each with its numeric id; `user` defaults to yourself
+- `/session edit <id> [date] [duration]` — change a session's date and/or duration; provide at least one of the two
+- `/session remove <id> [user]` — delete a session by its id; `user` targets another member (admin only)
+- `/session combine <ids>` — merge sessions sharing a user, activity, and date; `ids` is comma-separated such as `11, 12, 13`, and the lowest is kept
+- `/session tag <note> [id]` — attach a note to a session; `id` defaults to your active session
 
-Note: The bot exposes top-level shortcuts `/pause`, `/resume`, and `/cancel` as the primary commands for pausing, resuming, and cancelling active sessions.
+Only a session's owner or an admin may edit, remove, combine, or tag it.
+
+### Timezone
+- `/timezone [user] [timezone]` — view or set the timezone used for your daily stats; omit `timezone` to view or start typing it to preview zones with their current offset and local time, `user` targets another member (admin only)
+
+Your timezone decides which calendar day a session lands on, and where "today",
+"this week", and your streak begin. Members without one fall back to server time.
+
+### Fun
+- `/impersonate <user>` — copy a member's avatar, nickname, and role colour onto the bot (admin only)
+
+Running it again switches to the new member and hands back the colour role the
+previous run took. The bot keeps whichever identity was applied last; there is no
+command to change it back — reset the nickname in Server Settings and the avatar
+in the Discord Developer Portal.
+
+Colour is handled by a role named **Flair** that the bot creates and owns. Each
+call recolours it to match the member's display colour, so no member's own role
+is ever touched and no permissions come along with it. Discord shows the highest
+coloured role, so if the bot has another coloured role above Flair, drag Flair
+above it in Server Settings → Roles; the command says so when that happens.
+
+The avatar is an account-wide change, so it applies in every server the bot is
+in, and Discord rate limits it to roughly twice an hour. The nickname is
+per-server and needs **Change Nickname**; the Flair role needs **Manage Roles**.
+Discord always shows the non-removable BOT tag, so the bot stays identifiable as
+a bot.
 
 ### Quotes
-- `/quote add <string>` - Add a new quote (visible only to the adding user).
-- `/quote remove <id>` - Remove a quote by id (admin only).
-- `/quote list` - List all quotes (visible only to the requesting user).
-- `/gnaij` - Returns a random quote (visible only to the requesting user).
+- `/quote add <text>` — add a quote
+- `/quote remove <id>` — remove a quote (admin only)
+- `/quote list` — list all quotes
+- `/gnaij` — post a random quote; saying "gnaij" in chat does the same thing
+- `/vouch` — post random agreement from a fixed, uneditable pool of phrases
+- `/say <message>` — make the bot repeat a message
+
+### Server setup (server admins only)
+- `/admin add <role>` — grant bot admin privileges to a role
+- `/admin remove <role>` — revoke bot admin privileges from a role
+- `/admin list` — list configured admin roles
+- `/channel add <channel>` — restrict the bot to a channel
+- `/channel remove <channel>` — lift a channel restriction
+- `/channel list` — list allowed channels; none configured means the bot works everywhere
+
+`/admin`, `/channel`, and `/commands` deliberately stay usable in every channel,
+so a server admin cannot lock themselves out.
 
 ### Help
-- `/commands` - Show all available commands organized by category
+- `/commands` — show all commands grouped by category
+
+## Permissions
+
+Two levels:
+
+- **Server admin** — holds Discord's Administrator permission. Required for
+  `/admin` and `/channel`.
+- **Bot admin** — has Manage Server, or holds a role added via `/admin add`.
+  Required to manage activities, remove quotes, and act on other members.
 
 ## Database
 
-The bot uses SQLite (`time_tracker.db`) to store:
-- **Activities**: List of activities to track
-- **Sessions**: Per-day session records (date + duration in seconds) used for manual entries and migrated historical data
+SQLite (`bot_data.db` by default), holding activities and their icon bytes,
+sessions, quotes, per-guild admin roles, allowed channels, default activity,
+per-user timezones, and the id of the Flair role `/impersonate` maintains. The schema is created and upgraded automatically at startup,
+so an existing database can be dropped in as-is. A database still named
+`time_tracker.db` is picked up automatically, so an older deployment keeps
+working after an update without being renamed.
 
-## Example Workflow
+## Example workflow
 
-1. Create activities:
-   ```
-   /activity add Work
-   /activity add Exercise
-   /activity add Reading
-   ```
-
-2. View available activities:
-   ```
-   /activity list
-   ```
-
-3. Clock in:
-   ```
-   /clockin Work
-   ```
-
-4. Check status:
-   ```
-   /status
-   ```
-
-5. Clock out:
-   ```
-   /clockout
-   ```
-
-6. View all stats with heatmap:
-   ```
-   /stats
-   ```
-   Shows today, this week, all-time breakdown, plus a 12-week heatmap and key metrics (streak, max day, average, most active day)
-
-   View someone else's stats:
-   ```
-   /stats @username
-   ```
-
-7. View leaderboard for an activity:
-   ```
-   /leaderboard Work
-   ```
-
-## Admin Features
-
-### Clock in/out other users
-Admins can optionally specify a user parameter to clock in/out other users:
 ```
-/clockin Work @user
-/clockout @user
-```
-
-### Manage admin roles
-Server admins can manage which roles have admin privileges:
-```
-/admin add moderator
-/admin remove moderator
-/admin list
+/activity add Work
+/activity icon Work <attach image>
+/timezone timezone:America/Los_Angeles
+/clockin Work
+/pause
+/resume
+/clockout
+/stats
+/leaderboard Work
 ```
