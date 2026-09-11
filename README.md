@@ -157,9 +157,14 @@ in the Discord Developer Portal.
 
 Colour is handled by a role named **Flair** that the bot creates and owns. Each
 call recolours it to match the member's display colour, so no member's own role
-is ever touched and no permissions come along with it. Discord shows the highest
-coloured role, so if the bot has another coloured role above Flair, drag Flair
-above it in Server Settings → Roles; the command says so when that happens.
+is ever touched and no permissions come along with it.
+
+Discord shows a member's highest role that has a colour, so **the bot's own role
+must be colourless** for Flair to take effect — that is the default for a bot's
+integration role. If it has been given a colour, clear it in Server Settings →
+Roles; the command says so when this happens. Do not instead drag Flair above the
+bot's own role: a bot cannot edit a role at or above its highest one, so Flair
+would show but never change colour again.
 
 The avatar is an account-wide change, so it applies in every server the bot is
 in, and Discord rate limits it to roughly twice an hour. The nickname is

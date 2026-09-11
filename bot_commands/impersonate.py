@@ -203,15 +203,21 @@ def _existing_flair_role(guild: discord.Guild) -> discord.Role | None:
 
 
 def _warn_if_outranked(guild: discord.Guild, role: discord.Role, failures: list[str]) -> None:
-    """Discord shows the highest coloured role, so anything above Flair wins."""
-    higher = sorted(
+    """Discord shows the highest coloured role, so anything above Flair wins.
+
+    The fix is to clear the colour on that higher role, not to move Flair above
+    it: a role above the bot's own is one the bot is no longer allowed to edit,
+    which would freeze Flair on whatever colour it happened to have.
+    """
+    higher = max(
         (other for other in guild.me.roles if other.colour.value and other.position > role.position),
         key=lambda other: other.position,
+        default=None,
     )
-    if higher:
+    if higher is not None:
         failures.append(
-            f'Colour: **{higher[-1].name}** is a higher coloured role on the bot, so its colour '
-            f'shows instead. Move **{ROLE_NAME}** above it in Server Settings → Roles.'
+            f'Colour: **{higher.name}** sits above **{ROLE_NAME}** on the bot and has a colour, so '
+            f"its colour shows instead. Clear that role's colour in Server Settings → Roles."
         )
 
 
