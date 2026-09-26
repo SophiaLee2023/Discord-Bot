@@ -133,7 +133,7 @@ replies only to the member who ran it.
 - `/activity if <wage> [activity]` — estimate everyone's earnings at an hourly wage; `activity` defaults to the server default
 
 ### Time tracking
-- `/clockin [activity]` — start tracking time; `activity` defaults to the server default. The message it posts carries **Clock out**, **Pause**, and **Resume** buttons
+- `/clockin [activity]` — start tracking time; `activity` defaults to the server default. The message it posts carries **Clock out**, **Pause**, **Resume**, and **Cancel** buttons
 - `/clockout` — stop tracking and record the session
 - `/pause` — pause your running clock
 - `/resume` — resume your paused clock
@@ -163,7 +163,10 @@ buttons. Pausing and resuming edit that
 message rather than posting anything new, and `/pause` and `/resume` update it
 too, so the two ways of driving a clock never disagree. Clocking out — by button
 or by command — always posts its summary as a new message and leaves the clock-in
-message showing a final status with the buttons gone.
+message showing a final status with the buttons gone. **Cancel** throws the
+session away instead of recording it, saying so on the message and posting
+nothing; there is no confirmation step, so it discards immediately, the same as
+`/cancel`.
 
 The buttons survive a restart. A press carries no memory of the session — the
 clock-in buttons look it up by the id of the message they are on, which the

@@ -188,12 +188,7 @@ def _clock_out_embed(user: discord.abc.User, session, total_seconds: int) -> dis
 
 
 def _status_embed(message: discord.Message | None, status: str, colour: discord.Color) -> discord.Embed:
-    """Write a status into the clock-in embed, leaving the rest of it alone.
-
-    The embed is taken from the message itself, so the activity icon and the
-    original description survive every edit — an embed-only edit never touches
-    the attachment the icon is served from.
-    """
+    """Write a status into the clock-in embed, leaving the rest of it alone."""
     embed = message.embeds[0] if message is not None and message.embeds else ui.notice('Clock', colour)
     embed.colour = colour
     if embed.fields:
@@ -201,6 +196,34 @@ def _status_embed(message: discord.Message | None, status: str, colour: discord.
     else:
         embed.add_field(name='Status', value=status, inline=False)
     return embed
+
+
+def _icon_attachment(session) -> tuple[discord.File | None, str | None]:
+    """A fresh upload of the session activity's icon, with the URL to show it."""
+    row = db.query_one(
+        f'SELECT id, {icons.ICON_COLUMNS} FROM activities WHERE id = ?', (session['activity_id'],)
+    )
+    return icons.attachment(row)
+
+
+def _clock_edit(session, message: discord.Message | None, status: str, colour: discord.Color, *,
+                paused: bool | None) -> dict:
+    """Everything an edit of the clock-in message needs. `paused` None drops the buttons.
+
+    The icon is uploaded again on every edit. An `attachment://` link only
+    resolves against files sent in the same request, so a file merely carried
+    over is no longer part of the embed and Discord shows it underneath as a
+    plain attachment instead. Rewriting the image and the attachment together
+    also means the message follows an activity whose icon has since changed.
+    """
+    embed = _status_embed(message, status, colour)
+    icon, url = _icon_attachment(session) if session is not None else (None, None)
+    embed.set_image(url=url)
+    return {
+        'embed': embed,
+        'view': None if paused is None else SessionControls(paused=paused),
+        'attachments': [icon] if icon is not None else [],
+    }
 
 
 class SessionControls(discord.ui.View):
@@ -226,7 +249,7 @@ class SessionControls(discord.ui.View):
         if session is None or session['clock_out'] is not None:
             # Clocked out, cancelled, or from a database that no longer has it.
             await interaction.response.edit_message(
-                embed=_status_embed(interaction.message, 'Clocked out', ui.GREY), view=None
+                **_clock_edit(session, interaction.message, 'Clocked out', ui.GREY, paused=None)
             )
             return None
         if interaction.user.id != session['user_id']:
@@ -246,8 +269,9 @@ class SessionControls(discord.ui.View):
             total = _activity_total(conn, closed)
 
         await interaction.response.edit_message(
-            embed=_status_embed(interaction.message, f'Clocked out at {format_seconds(seconds)}', ui.GREY),
-            view=None,
+            **_clock_edit(
+                closed, interaction.message, f'Clocked out at {format_seconds(seconds)}', ui.GREY, paused=None
+            )
         )
         # Clocking out still announces itself in a new message, button or command.
         await interaction.followup.send(
@@ -270,8 +294,9 @@ class SessionControls(discord.ui.View):
                 seconds = _pause_session(conn, session, paused_at)
 
         await interaction.response.edit_message(
-            embed=_status_embed(interaction.message, _paused_status(seconds, paused_at), ui.GREY),
-            view=SessionControls(paused=True),
+            **_clock_edit(
+                session, interaction.message, _paused_status(seconds, paused_at), ui.GREY, paused=True
+            )
         )
 
     @discord.ui.button(
@@ -291,10 +316,27 @@ class SessionControls(discord.ui.View):
                 started = datetime.fromisoformat(session['clock_in'])
 
         await interaction.response.edit_message(
-            embed=_status_embed(
-                interaction.message, _running_status(started, session['duration_seconds']), ui.GREEN
-            ),
-            view=SessionControls(),
+            **_clock_edit(
+                session,
+                interaction.message,
+                _running_status(started, session['duration_seconds']),
+                ui.GREEN,
+                paused=False,
+            )
+        )
+
+
+    @discord.ui.button(label='Cancel', style=discord.ButtonStyle.danger, custom_id='clockin:cancel')
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        session = await self._session(interaction)
+        if session is None:
+            return
+
+        with db.db(commit=True) as conn:
+            conn.execute('DELETE FROM sessions WHERE id = ?', (session['id'],))
+
+        await interaction.response.edit_message(
+            **_clock_edit(session, interaction.message, 'Cancelled · nothing was recorded', ui.GREY, paused=None)
         )
 
 
@@ -458,10 +500,7 @@ async def _update_clock_message(
 
     try:
         message = await channel.fetch_message(session['message_id'])
-        await message.edit(
-            embed=_status_embed(message, status, colour),
-            view=None if paused is None else SessionControls(paused=paused),
-        )
+        await message.edit(**_clock_edit(session, message, status, colour, paused=paused))
     except discord.HTTPException:
         pass
 

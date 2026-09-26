@@ -17,7 +17,7 @@ SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ('/activity if <wage> [activity]', 'Estimate earnings for an activity'),
     )),
     ('Time Tracking', (
-        ('/clockin [activity]', 'Clock in to an activity, with clock out/pause/resume buttons'),
+        ('/clockin [activity]', 'Clock in, with clock out/pause/resume/cancel buttons'),
         ('/clockout', 'Clock out, with edit/note buttons on the summary'),
         ('/pause', 'Pause your current clock'),
         ('/resume', 'Resume your paused clock'),

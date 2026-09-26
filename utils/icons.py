@@ -36,13 +36,6 @@ def store(activity_id: int, filename: str, payload: bytes) -> None:
     )
 
 
-def clear(activity_id: int) -> None:
-    db.execute(
-        'UPDATE activities SET icon_blob = NULL, icon_filename = NULL, icon_data = NULL WHERE id = ?',
-        (activity_id,),
-    )
-
-
 def _column(row: sqlite3.Row | None, name: str):
     if row is None:
         return None
