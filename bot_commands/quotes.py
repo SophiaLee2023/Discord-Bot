@@ -1,4 +1,8 @@
-"""/quote, /gnaij, /vouch, and /say."""
+"""/quote, /gnaij, /vouch, and /say.
+
+These post as plain channel messages rather than command replies, so the
+bot appears to be talking on its own instead of answering someone.
+"""
 
 from __future__ import annotations
 
@@ -42,7 +46,7 @@ async def quote_add(interaction: discord.Interaction, text: str) -> None:
         return
 
     db.execute('INSERT INTO quotes (text) VALUES (?)', (text,))
-    await ui.send(interaction, 'Quote added.', ephemeral=True)
+    await ui.send_standalone(interaction, embed=ui.notice('Quote added.', ui.GREEN))
 
 
 @group.command(name='remove', description='Remove a quote by id')
@@ -55,21 +59,21 @@ async def quote_remove(interaction: discord.Interaction, id: int) -> None:
     if not db.execute('DELETE FROM quotes WHERE id = ?', (id,)):
         await ui.fail(interaction, 'Quote not found.')
         return
-    await ui.send(interaction, 'Quote removed.', ephemeral=True)
+    await ui.send_standalone(interaction, embed=ui.notice('Quote removed.', ui.GREEN))
 
 
 @group.command(name='list', description='List all quotes')
 async def quote_list(interaction: discord.Interaction) -> None:
     rows = db.query_all('SELECT id, text FROM quotes ORDER BY id')
     if not rows:
-        await ui.send(interaction, 'No quotes found.', color=ui.GREY, ephemeral=True)
+        await ui.send_standalone(interaction, embed=ui.notice('No quotes found.', ui.GREY))
         return
 
     lines = [f'{row["id"]}. {row["text"]}' for row in rows[:MAX_LISTED_QUOTES]]
     embed = discord.Embed(title='Quotes', description='\n'.join(lines)[:4096], color=ui.BLURPLE)
     if len(rows) > MAX_LISTED_QUOTES:
         embed.set_footer(text=f'Showing {MAX_LISTED_QUOTES} of {len(rows)} quotes.')
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await ui.send_standalone(interaction, embed=embed)
 
 
 @app_commands.command(name='gnaij', description='Say a random quote')
@@ -78,20 +82,18 @@ async def gnaij(interaction: discord.Interaction) -> None:
     if quote is None:
         await ui.fail(interaction, 'No quotes available.')
         return
-    await interaction.response.send_message(quote, allowed_mentions=ui.MENTIONS_ONLY_USERS)
+    await ui.send_standalone(interaction, content=quote)
 
 
 @app_commands.command(name='vouch', description='Vouch for whatever was just said')
 async def vouch(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message(
-        random.choice(VOUCHES), allowed_mentions=ui.MENTIONS_ONLY_USERS
-    )
+    await ui.send_standalone(interaction, content=random.choice(VOUCHES))
 
 
 @app_commands.command(name='say', description='Make the bot say something')
 @app_commands.describe(message='What the bot should say')
 async def say(interaction: discord.Interaction, message: str) -> None:
-    await interaction.response.send_message(message, allowed_mentions=ui.MENTIONS_ONLY_USERS)
+    await ui.send_standalone(interaction, content=message)
 
 
 def register(tree: app_commands.CommandTree) -> None:

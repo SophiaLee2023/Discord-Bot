@@ -2,7 +2,10 @@
 
 from collections.abc import Iterable, Mapping
 
-from utils.time_utils import format_seconds
+from utils.time_utils import format_date, format_seconds
+
+# Discord allows far more, but a note is meant to be a label, not a paragraph.
+MAX_NOTE_LENGTH = 500
 
 
 def session_duration_seconds_sql(alias: str = 'sessions') -> str:
@@ -29,13 +32,18 @@ def parse_session_ids(value: str) -> list[int]:
 
 
 def build_session_list_fields(rows: Iterable[Mapping[str, object]], hide_activity_name: bool = False) -> list[tuple[str, str]]:
-    """Group session rows by date and split field values within Discord's limit."""
+    """Group session rows by date and split field values within Discord's limit.
+
+    Rows are grouped on the stored ISO date so they keep the order the query
+    returned them in, and only the field name is shown as `MM-DD-YYYY`.
+    """
     grouped: dict[str, list[Mapping[str, object]]] = {}
     for row in rows:
         grouped.setdefault(str(row['date']), []).append(row)
 
     fields = []
     for session_date, sessions in grouped.items():
+        label = format_date(session_date)
         lines = []
         for session in sessions:
             state = f' ({session["state"]})' if session['state'] else ''
@@ -55,11 +63,11 @@ def build_session_list_fields(rows: Iterable[Mapping[str, object]], hide_activit
         for line in lines:
             line_length = len(line) + 1
             if chunk and chunk_length + line_length > 1024:
-                fields.append((session_date, '\n'.join(chunk)))
+                fields.append((label, '\n'.join(chunk)))
                 chunk = []
                 chunk_length = 0
             chunk.append(line)
             chunk_length += line_length
         if chunk:
-            fields.append((session_date, '\n'.join(chunk)))
+            fields.append((label, '\n'.join(chunk)))
     return fields

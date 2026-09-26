@@ -78,6 +78,18 @@ bot = build_bot()
 
 
 @bot.event
+async def setup_hook() -> None:
+    """Re-arm the clock-in and clock-out buttons before connecting.
+
+    One instance of each view listens for every message of its kind ever posted,
+    because a press resolves its session from the message it is on. Without this
+    the buttons on messages from an earlier run would do nothing.
+    """
+    bot.add_view(bot_commands.tracking.SessionControls())
+    bot.add_view(bot_commands.tracking.SessionSummary())
+
+
+@bot.event
 async def on_ready() -> None:
     log.info('%s connected to Discord', bot.user)
     try:

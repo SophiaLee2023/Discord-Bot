@@ -29,7 +29,7 @@ def _square(hours: float) -> str:
     return next((symbol for limit, symbol in HEATMAP_SCALE if hours < limit), HEATMAP_OVERFLOW)
 
 
-@app_commands.command(name='stats', description='View all your stats with heatmap')
+@app_commands.command(name='stats', description='View all your stats with 12-week activity')
 @app_commands.describe(user='Optional: mention a member to view their stats')
 async def stats(interaction: discord.Interaction, user: discord.User | None = None) -> None:
     target = user or interaction.user
@@ -45,7 +45,7 @@ async def stats(interaction: discord.Interaction, user: discord.User | None = No
         if daily_stats:
             embeds.append(
                 discord.Embed(
-                    title=f'Activity Heatmap (Last {HEATMAP_WEEKS} Weeks)',
+                    title=f'{HEATMAP_WEEKS}-Week Activity',
                     description=generate_heatmap(daily_stats, today - timedelta(weeks=HEATMAP_WEEKS), today),
                     color=ui.GREEN,
                 )
@@ -58,9 +58,7 @@ async def stats(interaction: discord.Interaction, user: discord.User | None = No
         value=await ui.resolve_user_display(interaction.client, target.id, interaction.guild),
         inline=False,
     )
-    await interaction.response.send_message(
-        embeds=embeds, ephemeral=True, allowed_mentions=ui.MENTIONS_ONLY_USERS
-    )
+    await interaction.response.send_message(embeds=embeds, allowed_mentions=ui.MENTIONS_ONLY_USERS)
 
 
 def _totals_embed(conn, interaction, target, now: datetime, today: date) -> discord.Embed:
@@ -226,12 +224,7 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str | Non
         ).fetchall()
 
     if not rows:
-        await ui.send(
-            interaction,
-            f'No one has tracked time for **{activity["name"]}** yet!',
-            color=ui.GREY,
-            ephemeral=True,
-        )
+        await ui.send(interaction, f'No one has tracked time for **{activity["name"]}** yet!', color=ui.GREY)
         return
 
     medals = ('1st', '2nd', '3rd')
@@ -241,9 +234,7 @@ async def leaderboard(interaction: discord.Interaction, activity_name: str | Non
         rank = medals[index] if index < len(medals) else f'{index + 1}.'
         embed.add_field(name=rank, value=f'{display}\n{format_seconds(row["seconds"] or 0)}', inline=False)
 
-    await interaction.response.send_message(
-        embed=embed, ephemeral=True, allowed_mentions=ui.MENTIONS_ONLY_USERS
-    )
+    await interaction.response.send_message(embed=embed, allowed_mentions=ui.MENTIONS_ONLY_USERS)
 
 
 def register(tree: app_commands.CommandTree) -> None:

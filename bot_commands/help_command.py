@@ -17,42 +17,44 @@ SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ('/activity if <wage> [activity]', 'Estimate earnings for an activity'),
     )),
     ('Time Tracking', (
-        ('/clockin [activity] [user]', 'Clock in to an activity'),
-        ('/clockout [user]', 'Clock out of your current activity'),
+        ('/clockin [activity]', 'Clock in to an activity, with clock out/pause/resume buttons'),
+        ('/clockout', 'Clock out, with edit/note buttons on the summary'),
         ('/pause', 'Pause your current clock'),
         ('/resume', 'Resume your paused clock'),
-        ('/cancel [user]', 'Cancel and delete an active session'),
+        ('/cancel', 'Cancel and delete your active session'),
     )),
     ('Statistics', (
-        ('/stats [user]', 'View stats with heatmap and metrics'),
+        ('/stats [user]', 'View stats with 12-week activity and metrics'),
         ('/leaderboard [activity]', 'View activity leaderboard'),
     )),
     ('Sessions', (
-        ('/session add <duration> [date] [activity] [user]', 'Add a session, e.g. `120`, `2h 15m`, `2:15:00`'),
-        ('/session list [user]', 'List sessions (defaults to yourself)'),
+        ('/session add <duration> [date] [activity]', 'Add a session, e.g. `2h 15m`, `2h30m`, `2:15:00`'),
+        ('/session list', 'List your sessions'),
         ('/session edit <id> [date] [duration]', 'Change a session date and/or duration'),
-        ('/session remove <id> [user]', 'Remove a session by numeric id'),
+        ('/session remove <id>', 'Remove one of your own sessions by id'),
         ('/session combine <ids>', 'Combine matching sessions, e.g. `11, 12, 13`'),
-        ('/session tag <note> [id]', 'Attach a note to a session'),
+        ('/session tag <note> <id>', 'Attach a note to a session by id'),
     )),
     ('Preferences', (
-        ('/timezone [user] [timezone]', 'View or set the timezone used for your daily stats'),
+        ('/timezone [timezone]', 'View or set the timezone used for your daily stats'),
     )),
     ('Fun', (
-        ('/impersonate <user>', "Copy a member's avatar, nickname and colour onto the bot (admin only)"),
-    )),
-    ('Quotes', (
         ('/quote add <text>', 'Add a new quote'),
         ('/quote remove <id>', 'Remove a quote (admin only)'),
         ('/quote list', 'List all quotes'),
-        ('/gnaij', 'Say a random quote'),
+        ('/gnaij', 'Say a random quote; saying "gnaij" in chat does the same'),
         ('/vouch', 'Vouch for whatever was just said'),
+        ('/say <message>', 'Make the bot repeat a message'),
+        ('/impersonate <user>', "Copy a member's avatar, nickname and colour onto the bot (admin only)"),
     )),
     ('Server Setup (server admins)', (
         ('/admin add|remove <role>', 'Grant or revoke bot admin privileges for a role'),
         ('/admin list', 'List all admin roles'),
         ('/channel add|remove <channel>', 'Restrict the bot to specific channels'),
         ('/channel list', 'List allowed channels'),
+    )),
+    ('Help', (
+        ('/commands', 'Show this list'),
     )),
 )
 

@@ -117,7 +117,7 @@ async def activity_default(interaction: discord.Interaction, name: str | None = 
             else None
         )
         if not row:
-            await ui.send(interaction, 'No default activity set for this server.', color=ui.GREY, ephemeral=True)
+            await ui.send(interaction, 'No default activity set for this server.', color=ui.GREY)
             return
 
         embed = discord.Embed(title='Default Activity', description=f'**{row["name"]}**', color=ui.BLURPLE)
@@ -172,9 +172,7 @@ async def activity_if(
         display = await ui.resolve_user_display(interaction.client, row['user_id'], interaction.guild)
         lines.append(f'{display}: {format_time(hours)} → ${hours * wage:,.2f}')
 
-    await interaction.response.send_message(
-        '\n'.join(lines), ephemeral=True, allowed_mentions=ui.MENTIONS_ONLY_USERS
-    )
+    await interaction.response.send_message('\n'.join(lines), allowed_mentions=ui.MENTIONS_ONLY_USERS)
 
 
 def register(tree: app_commands.CommandTree) -> None:

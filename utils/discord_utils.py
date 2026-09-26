@@ -30,14 +30,13 @@ async def send(
     description: str,
     *,
     color: discord.Color = GREEN,
-    ephemeral: bool = False,
 ) -> None:
     """Reply with a single-line embed, using a follow-up if already responded."""
     embed = notice(description, color)
     if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        await interaction.followup.send(embed=embed)
     else:
-        await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
+        await interaction.response.send_message(embed=embed)
 
 
 async def send_embed(
@@ -45,19 +44,48 @@ async def send_embed(
     embed: discord.Embed,
     *,
     file: discord.File | None = None,
-    ephemeral: bool = False,
+    view: discord.ui.View | None = None,
 ) -> None:
-    """Reply with an embed, including an attached file only when there is one."""
-    extra = {'file': file} if file is not None else {}
+    """Reply with an embed, passing an attached file or a view only when given one."""
+    extra = {}
+    if file is not None:
+        extra['file'] = file
+    if view is not None:
+        extra['view'] = view
     if interaction.response.is_done():
-        await interaction.followup.send(embed=embed, ephemeral=ephemeral, **extra)
+        await interaction.followup.send(embed=embed, **extra)
     else:
-        await interaction.response.send_message(embed=embed, ephemeral=ephemeral, **extra)
+        await interaction.response.send_message(embed=embed, **extra)
+
+
+async def send_standalone(
+    interaction: discord.Interaction,
+    *,
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+) -> None:
+    """Post in the channel as a plain message, with no "used /command" line.
+
+    Discord attributes a command reply to whoever ran it, so the interaction is
+    acknowledged and that acknowledgement is then deleted, leaving only the
+    message the bot sends itself. Nobody ever sees the acknowledgement.
+    """
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.delete_original_response()
+    except discord.HTTPException:
+        pass
+
+    payload = {key: value for key, value in (('content', content), ('embed', embed)) if value is not None}
+    if interaction.channel is None:
+        await interaction.followup.send(**payload)
+        return
+    await interaction.channel.send(allowed_mentions=MENTIONS_ONLY_USERS, **payload)
 
 
 async def fail(interaction: discord.Interaction, description: str) -> None:
-    """Reply with an ephemeral error embed."""
-    await send(interaction, description, color=RED, ephemeral=True)
+    """Reply with an error embed."""
+    await send(interaction, description, color=RED)
 
 
 async def resolve_user_display(

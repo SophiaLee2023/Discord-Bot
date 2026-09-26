@@ -9,7 +9,6 @@ from discord import app_commands
 
 from utils import db
 from utils import discord_utils as ui
-from utils import permissions
 from utils import timezones
 
 
@@ -25,24 +24,11 @@ async def timezone_autocomplete(
 
 
 @app_commands.command(name='timezone', description='View or set the timezone used for your daily stats')
-@app_commands.describe(
-    user='Optional: another member to view or set (admin only)',
-    timezone='Start typing to preview timezones, e.g. Los_Angeles or Europe/',
-)
+@app_commands.describe(timezone='Start typing to preview timezones, e.g. Los_Angeles or Europe/')
 @app_commands.autocomplete(timezone=timezone_autocomplete)
-async def timezone_command(
-    interaction: discord.Interaction,
-    user: discord.User | None = None,
-    timezone: str | None = None,
-) -> None:
-    target = user or interaction.user
-
-    if user is not None and user.id != interaction.user.id and not permissions.is_admin(interaction):
-        await ui.fail(interaction, 'Only admins can view or set the timezone of another member.')
-        return
-
+async def timezone_command(interaction: discord.Interaction, timezone: str | None = None) -> None:
     if timezone is None:
-        await _show(interaction, target)
+        await _show(interaction)
         return
 
     zone_name = timezones.canonical_name(timezone)
@@ -54,34 +40,26 @@ async def timezone_command(
         )
         return
 
-    db.set_user_timezone(target.id, zone_name)
-    whose = 'Your' if target.id == interaction.user.id else f"{target.mention}'s"
-    await ui.send(
-        interaction,
-        f'{whose} timezone is now **{zone_name}** ({timezones.preview(zone_name)}).',
-        ephemeral=True,
-    )
+    db.set_user_timezone(interaction.user.id, zone_name)
+    await ui.send(interaction, f'Your timezone is now **{zone_name}** ({timezones.preview(zone_name)}).')
 
 
-async def _show(interaction: discord.Interaction, target: discord.abc.User) -> None:
-    zone_name = db.get_user_timezone(target.id)
-    whose = 'Your' if target.id == interaction.user.id else f"{target.mention}'s"
+async def _show(interaction: discord.Interaction) -> None:
+    zone_name = db.get_user_timezone(interaction.user.id)
 
     if not zone_name:
         await ui.send(
             interaction,
-            f'{whose} timezone is not set, so server time is used. '
+            'Your timezone is not set, so server time is used. '
             'Set one with `/timezone timezone:<zone>`.',
             color=ui.GREY,
-            ephemeral=True,
         )
         return
 
     await ui.send(
         interaction,
-        f'{whose} timezone is **{zone_name}** ({timezones.preview(zone_name)}).',
+        f'Your timezone is **{zone_name}** ({timezones.preview(zone_name)}).',
         color=ui.BLURPLE,
-        ephemeral=True,
     )
 
 

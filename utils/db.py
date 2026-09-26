@@ -85,6 +85,8 @@ TABLES = (
         clock_out TIMESTAMP,
         paused_at TIMESTAMP,
         note TEXT,
+        channel_id INTEGER,
+        message_id INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (activity_id) REFERENCES activities (id)
     )''',
@@ -149,6 +151,10 @@ ADDED_COLUMNS = {
         ('clock_out', 'TIMESTAMP'),
         ('paused_at', 'TIMESTAMP'),
         ('note', 'TEXT'),
+        # Where /clockin posted this session's buttons, so they keep working
+        # after a restart and commands can update the message they are on.
+        ('channel_id', 'INTEGER'),
+        ('message_id', 'INTEGER'),
     ),
     'user_settings': (
         ('timezone', 'TEXT'),
